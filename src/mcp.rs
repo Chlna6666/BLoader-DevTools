@@ -5,8 +5,8 @@
 //! localhost-only socket, Origin rejection and tightly scoped commands.
 
 use std::{
-    ffi::c_void, io::{Read, Write}, mem, net::{TcpListener, TcpStream},
-    ptr, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    collections::VecDeque, ffi::c_void, io::{Read, Write}, mem, net::{TcpListener, TcpStream},
+    ptr, sync::{Arc, Mutex, mpsc::{self, SyncSender}, atomic::{AtomicBool, Ordering}},
     thread::{self, JoinHandle}, time::Duration,
 };
 
@@ -37,6 +37,28 @@ pub struct Connection {
     token: String,
 }
 static SERVER: Mutex<Option<Connection>> = Mutex::new(None);
+
+/// Capture commands are processed only on the DevTools-owned D3D11/UI thread.
+pub(crate) enum UiCommand {
+    Capture(SyncSender<Result<Vec<u8>, String>>),
+}
+static UI_COMMANDS: Mutex<VecDeque<UiCommand>> = Mutex::new(VecDeque::new());
+
+pub(crate) fn drain_ui_commands() -> Vec<UiCommand> {
+    UI_COMMANDS.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default()
+}
+
+fn capture_devtools_gpu() -> Result<Vec<u8>, String> {
+    if window::ui_hwnd() == 0 { return Err("DevTools UI 尚未创建".into()); }
+    let (sender, receiver) = mpsc::sync_channel(1);
+    {
+        let mut queue = UI_COMMANDS.lock().map_err(|_| "UI 命令队列已损坏")?;
+        if queue.len() >= 4 { return Err("UI 截图队列已满".into()); }
+        queue.push_back(UiCommand::Capture(sender));
+    }
+    receiver.recv_timeout(Duration::from_secs(4))
+        .map_err(|_| "UI GPU 截图超时，请检查渲染线程是否正在执行")?
+}
 const MAX_REQUEST_BYTES: usize = 65536;
 const MAX_IMAGE_PIXELS: usize = 1920 * 1080;
 
@@ -192,7 +214,7 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
             },
             {
                 "name":"capture_window",
-                "description":"尝试截取目标窗口客户端区域并以 PNG 返回。D3D/UWP 游戏表面可能不支持 GDI 捕获，黑屏将作为错误报告；不会伪造游戏截图。",
+                "description":"截取窗口 PNG：DevTools 使用原生 D3D11 GPU 读回，游戏窗口使用实验性 GDI PrintWindow（遇到黑屏则报告失败）。",
                 "inputSchema":{"type":"object","properties":{"target":{"type":"string","enum":["devtools","game"]}},"required":["target"]}
             },
             {
@@ -253,9 +275,14 @@ fn call_tool(request:&Value) -> Value {
                 hwnd as usize,width,height
             )}]})),
             "capture_window" => {
-                let image = capture_gdi(hwnd,width,height)?;
+                let image = if target == "devtools" {
+                    capture_devtools_gpu()?
+                } else {
+                    capture_gdi(hwnd,width,height)?
+                };
                 Ok(json!({"content":[
-                    {"type":"text","text":format!("target={target}; width={width}; height={height}; capture=PrintWindow")}
+                    {"type":"text","text":format!("target={target}; width={width}; height={height}; capture={}",
+                        if target == "devtools" { "Direct3D11 GPU readback" } else { "PrintWindow experimental" })}
                     ,{"type":"image","mimeType":"image/png","data":STANDARD.encode(image)}
                 ]}))
             },

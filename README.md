@@ -90,10 +90,14 @@ v0.1.3 在 BL Mod `on_load` 后启动 UI 线程，成功创建 Win32 窗口就�
 - 全部在 Minecraft 游戏进程的 DLL 中运行，不安装独立 EXE；从“设置与关于”手动开启/关闭本机 MCP 服务。
 - 仅绑定 127.0.0.1 随机端口；32 字节随机 Bearer token 可由 DevTools 设置页复制；缺少 token 的连接拒绝。拒绝浏览器 Origin 头，阻止 DNS rebinding。**默认关闭，卸载时关闭。**
 - MCP Streamable HTTP 的工具包括 window_info、capture_window、click_window；target 支持 devtools 和 game，点击坐标是相对客户区像素。
-- 截图当前使用 Windows GDI PrintWindow，**不能保证 RenderDragon/D3D/UWP 游戏画面可用**；黑屏或失败会返回工具错误，之后需要实现 D3D 图形读回或 Windows Graphics Capture。
+- 游戏截图当前使用 Windows GDI PrintWindow，**不能保证 RenderDragon/D3D/UWP 游戏画面可用**；黑屏或失败会返回工具错误，之后需要实现 D3D 图形读回或 Windows Graphics Capture。
 - 点击通过 Win32 窗口消息传送；Minecraft Raw Input 可能绕过此消息处理。不能根据“消息发送成功”判断游戏逻辑处理成功，必须重新截图验证。
 - 需要在本机 Codex 或其他支持 MCP HTTP + 自定义 Authorization 请求头的客户端中填入 DevTools 页面显示的 MCP 地址和 token。**ChatGPT 云端无法直接访问你电脑的 127.0.0.1。**
 - AI 识图由支持视觉的 MCP 客户端模型执行，DevTools 本身不做 OCR 或 LLM 推理。
 - MCP 仅用于本人有权控制的离线/单人游戏测试，不应向公网暴露，也不建议在不受信任 Mod 或多人服务器中开启。
 
 验证边界：GitHub Actions 只覆盖 Windows 编译、单元测试与发布打包；并不代表 MCP 游戏画面捕获、点击和实际 UI 显示已通过实机。
+
+### DevTools 自身窗口 GPU 截图
+
+MCP 截取 DevTools 自身 UI 时，走独立 D3D11 Swapchain 的按需 staging readback（帧绘制后、Present 前），不再依赖 PrintWindow。正常使用时不持续读回 GPU，只有 MCP capture_window(target=devtools) 才执行一次纹理复制、Map、PNG 编码；游戏窗口仍使用实验性 GDI 捕获，是否有效由调用结果提示。

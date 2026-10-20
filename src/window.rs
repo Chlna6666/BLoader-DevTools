@@ -378,16 +378,61 @@ impl Graphics {
         self.size = (width, height);
         Ok(())
     }
+    fn capture_png(&mut self) -> Result<Vec<u8>, String> {
+        // Capture ONLY on explicit MCP request, before Present; no idle GPU readback.
+        let source = unsafe { self.chain.GetBuffer::<ID3D11Texture2D>(0) }
+            .map_err(|err| err.to_string())?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { source.GetDesc(&mut desc); }
+        if desc.Width == 0 || desc.Height == 0 ||
+            (desc.Width as u64) * (desc.Height as u64) > 1920*1080 {
+            return Err("UI backbuffer 超出截图尺寸上限".into());
+        }
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.BindFlags = 0;
+        desc.MiscFlags = 0;
+        let mut staging = None;
+        unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+            .map_err(|err| err.to_string())?;
+        let staging = staging.ok_or("CreateTexture2D staging 失败")?;
+        unsafe { self.context.CopyResource(&staging, &source); }
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { self.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+            .map_err(|err| err.to_string())?;
+        let mut rgba=vec![0u8; (desc.Width as usize)*(desc.Height as usize)*4];
+        unsafe {
+            let ptr = mapped.pData as *const u8;
+            for row in 0..desc.Height as usize {
+                std::ptr::copy_nonoverlapping(
+                    ptr.add(row * mapped.RowPitch as usize),
+                    rgba.as_mut_ptr().add(row * desc.Width as usize * 4),
+                    desc.Width as usize * 4,
+                );
+            }
+            self.context.Unmap(&staging, 0);
+        }
+        let mut png_bytes=Vec::new();
+        {
+            let mut encoder=png::Encoder::new(&mut png_bytes, desc.Width, desc.Height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer=encoder.write_header().map_err(|err|err.to_string())?;
+            writer.write_image_data(&rgba).map_err(|err|err.to_string())?;
+        }
+        Ok(png_bytes)
+    }
+
     fn render(
         &mut self, ctx: &Context, output: egui_directx11::RendererOutput,
-    ) -> windows::core::Result<()> {
-        let Some(view) = self.target.as_ref() else { return Ok(()); };
-        unsafe {
-            self.context.ClearRenderTargetView(view, &[0.075, 0.083, 0.105, 1.0]);
-        }
+        screenshot: bool,
+    ) -> windows::core::Result<Option<Result<Vec<u8>,String>>> {
+        let Some(view) = self.target.as_ref() else { return Ok(None); };
+        unsafe { self.context.ClearRenderTargetView(view, &[0.075,0.083,0.105,1.0]); }
         self.renderer.render(&self.context, view, ctx, output)?;
+        let capture = screenshot.then(|| self.capture_png());
         unsafe { self.chain.Present(1, DXGI_PRESENT(0)) }.ok()?;
-        Ok(())
+        Ok(capture)
     }
 }
 
@@ -537,6 +582,16 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         }
         was_f8_down = f8_down;
 
+        let mut pending_captures = Vec::new();
+        for command in crate::mcp::drain_ui_commands() {
+            match command {
+                crate::mcp::UiCommand::Capture(reply) => {
+                    pending_captures.push(reply);
+                    mark_dirty(None);
+                }
+            }
+        }
+
         let (visible, dirty, events) = INPUT.with(|cell| {
             let mut state = cell.borrow_mut();
             let dirty = mem::take(&mut state.dirty);
@@ -563,16 +618,25 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                                 clipboard_write(hwnd as isize, &value);
                             }
                         }
-                        match gfx.render(&ctx, draw) {
-                            Ok(()) if !first_frame_logged => {
-                                first_frame_logged = true;
-                                info("[BLoader DevTools] UI_READY: first D3D11 Present succeeded; UI is visible by default (F8 optional)");
+                        match gfx.render(&ctx, draw, !pending_captures.is_empty()) {
+                            Ok(captured) => {
+                                if !first_frame_logged {
+                                    first_frame_logged = true;
+                                    info("[BLoader DevTools] UI_READY: first D3D11 Present succeeded; UI is visible by default (F8 optional)");
+                                }
+                                if let Some(result) = captured {
+                                    for responder in pending_captures.drain(..) {
+                                        let _ = responder.send(result.clone());
+                                    }
+                                }
                             }
                             Err(err) => {
                                 error(format!("[BLoader DevTools] D3D11_PRESENT_FAILED: {err}"));
+                                for responder in pending_captures.drain(..) {
+                                    let _ = responder.send(Err(format!("D3D11 Present 失败: {err}")));
+                                }
                                 keep_running = false;
                             }
-                            _ => {}
                         }
                         if workbench.hide_requested {
                             workbench.hide_requested = false;
@@ -582,6 +646,9 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     }
                 }
             }
+        }
+        for responder in pending_captures.drain(..) {
+            let _ = responder.send(Err("UI 没有生成有效截图帧".into()));
         }
         unsafe {
             MsgWaitForMultipleObjectsEx(
