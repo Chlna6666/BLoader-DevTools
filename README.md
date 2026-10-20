@@ -1,103 +1,80 @@
 # BLoader DevTools
 
-BLoader DevTools 是在 Minecraft Bedrock 进程内运行的开源 BL Mod，使用 Rust + egui + DirectX 11。没有独立 UI EXE；UI 由 DLL 自行创建，使用独立的 Win32 游戏子窗口（必要时同进程顶层窗口）与消息/渲染线程。
+版本：0.2.0 · 作者：Chlna6666 · GPL-3.0-only
 
-- 版本：0.1.3
-- 作者：Chlna6666
-- 协议：GPL-3.0-only
-- 源码：https://github.com/Chlna6666/BLoader-DevTools
+项目：https://github.com/Chlna6666/BLoader-DevTools
 
-## 安装（重要：不能只复制裸 DLL）
+Minecraft Bedrock 进程内的独立原生 Mod 开发工作台。**BLoader 只负责 BL Mod 的加载、卸载和宿主日志。内存扫描、反汇编、脚本、特征码、模块检查和 MCP 都在 DevTools DLL 内实现。** 不需要 DevTools.exe，不修改 BLoader Core。
 
-**BLoader 的裸 DLL 自动打包规则会把它归类为 `preload-native`，这种加载方式仅调用 `LoadLibrary`，不会执行 `bl_mod_main_v1` / `on_load`。因此旧版只有 DLL 的压缩包会造成“加载了却没有窗口和 DevTools 日志”的现象。**
+## 安装
 
-请在 [Actions Windows 构建页面](https://github.com/Chlna6666/BLoader-DevTools/actions/workflows/windows-build.yml) 下载最新的 `bloader-devtools-windows-x64`，解压后把目录完整放进**正在运行的游戏版本目录**。目标结构：
+从 [Windows 构建](https://github.com/Chlna6666/BLoader-DevTools/actions/workflows/windows-build.yml) 下载包含 manifest.json 与 bloader_devtools.dll 的 bloader-devtools-windows-x64 安装包：
 
-```text
-Minecraft 游戏版本目录/
+~~~text
+Minecraft版本目录/
 └── mods/
     └── bloader.devtools/
-        ├── manifest.json       # type 必须为 "BL"
+        ├── manifest.json        # type = BL
         └── bloader_devtools.dll
-```
+~~~
 
-也可以从仓库 `package/manifest.json` 复制清单，并将对应新版本 Release DLL 放在同一目录。**不要只把 DLL 放在 mods 根目录。**
+**不能只放 DLL。** BLoader 对裸 DLL 使用 preload-native 加载方式，不调用 BL Mod 的 on_load。请删除此前自动创建的 mods/bloader_devtools 旧包。
 
-如果之前已经安装了 `mods/bloader_devtools/` 自动生成的旧包（`manifest.json` 中 `type=preload-native`），请先移除旧包，避免重复加载或沿用错误的入口类型。
+DevTools 启动时自动显示 egui UI。F8 为可选显隐热键。UI 是游戏进程内 Win32 子窗口，远程桌面或 UWP 宿主无法作为父窗口时使用同进程顶层窗口；均不创建独立 EXE。
 
-## 控制台诊断
+## 0.2.0 IDEA 风格工作区
 
-加载成功时应先看到 BLoader 的 `Loading BL Mod: BLoader DevTools`，随后看到 DevTools 自己的：
+- 左侧项目栏：编辑器工具导航、已保存的特征规则。
+- 中央标签页：内存扫描、十六进制、反汇编、AOB、脚本、版本对比、模块与 Hook 线索、设置。
+- 右侧检查器：地址、数据类型、预期旧值和新值，明确授权后执行 compare-before-write。
+- 底部控制台：任务执行和错误记录。扫描在线程池之外的独立后台工作线程执行，支持用户取消，游戏渲染线程不做内存扫描。
 
-```text
-[BLoader DevTools] v0.1.3 | Windows x64
-[BLoader DevTools] Author: Chlna6666
-[BLoader DevTools] License: GPL-3.0-only (open source)
-[BLoader DevTools] Source: https://github.com/Chlna6666/BLoader-DevTools
-[BLoader DevTools] UI: in-process Win32 child + egui + D3D11
-[BLoader DevTools] UI worker started; UI_READY will be logged after the first Present
-[BLoader DevTools] UI_THREAD_STARTED; searching for Minecraft top-level HWND
-[BLoader DevTools] GAME_HWND_FOUND hwnd=...
-[BLoader DevTools] CHILD_WINDOW_CREATED hwnd=...
-[BLoader DevTools] D3D11_DEVICE_READY; initializing egui frame
-[BLoader DevTools] UI_READY: first D3D11 Present succeeded; press F8 to show/hide
-```
+功能与边界：
 
-如果只有 `native-load`、`preload-native` 等消息，而没有 `Loading BL Mod`，说明 Mod 清单类型仍然不正确。若有 `WAITING_FOR_GAME_HWND`，说明 UI 线程没有识别到可用的游戏窗口；若有 `UI_THREAD_FAILED` 或 `D3D11_PRESENT_FAILED`，请提供对应错误号/错误信息。
+| 模块 | 进展 |
+|---|---|
+| 扫描与变化筛选 | 已实现 U8/U32/U64/F32/F64；精确值/变化/不变/增加/减少；当前限前 128 MiB 的可读内存及 8192 条结果 |
+| 十六进制 | 已实现按指定地址读取与 ASCII 展示 |
+| 反汇编 | 已实现 iced-x86 的 64 位指令解码，不修改代码 |
+| AOB | 离线样本匹配、进程内搜索、复制和本地保存 |
+| 数据修改 | 已实现手动旧值验证，仅修改可写数据页；没有任意代码补丁 |
+| 脚本实验室 | 已实现受限 CE 风格 DSL，后台执行；写入需要本轮显式启用 |
+| 模块 / Hook 检查 | 已实现进程模块列表和入口 JMP/INT3 启发式检查；不能可靠判断所有第三方私有 Hook 的所有者 |
+| 版本迁移 | 支持对两个本地二进制按 AOB 比较文件偏移；尚未实现自动 CFG/语义/ABI 恢复 |
+| 暂停断点 / 单步调试 | 尚未实现，不能把现有反汇编冒充完整调试器 |
 
-## 当前实现范围
+脚本支持最多 40 条命令，不允许循环、调用任意 OS 接口或执行机器码：
 
-- BL Mod v1 ABI 的 `bl_mod_main_v1` 和 `on_load/on_unload`；
-- 初始化后创建独立 UI 线程，等待游戏 HWND，再创建 Win32 游戏子窗口；
-- egui 0.35 + egui-directx11，独立 D3D11 Device/Swapchain，**启动时自动显示，无需按 F8**；
-- 对 RDP 远程会话使用同进程顶层窗口；若游戏主窗口不属于当前 PID，3 秒内回退，不再无限等待；
-- 游戏子窗口创建失败或其 Swapchain 初始化失败时自动尝试同进程顶层窗口；
-- 硬件 D3D11 初始化失败时尝试 WARP 软件渲染，并记录显式诊断日志。
-- AOB/十六进制离线测试、通配符匹配、复制特征；
-- 包含 Memory、Disassembly、Version Migration、Hooks 等页面，但**目前尚未实现对游戏的内存扫描、断点和真实 Hook 检测**；
-- 未安装额外 EXE；不 Hook Minecraft 原有 Present；无需独立服务进程。
+~~~text
+scan f32 90
+next changed
+# disasm 0x7FF600001000 24
+# aob 48 8B 05 ?? ?? ?? ??
+# write 0x7FF600001000 f32 90 65
+~~~
 
-### 已知限制
+write 需要显式勾选当前运行的写入权限，并指定预期旧值。如果扫描结果已变化，写入会拒绝；不会自动更改页面权限或修补可执行代码。工程脚本与特征数据库保存至 %LOCALAPPDATA%\BLoader-DevTools\ 。
 
-此版不是 RenderDragon Swapchain 内的叠加纹理，而是同一进程下的 Win32 子窗口。窗口化/无边框模式优先测试。远程桌面通常能显示顶层窗口，但**只捕获游戏 Swapchain 的直播/串流软件未必会捕获独立窗口或 Win32 子窗口**；这种情况需要进一步实现真正绘制进游戏渲染目标的 Overlay，不是 F8 问题。需要实测 D3D Swapchain 与游戏窗口遮挡次序、Raw Input、鼠标锁定、跨线程子窗口焦点、中文 IME、DPI、游戏退出与卸载。进程整体被暂停时，同进程 UI 也会暂停。
+## MCP 与游戏窗口修复
 
-## 构建
+MCP 默认关闭，在 DevTools 设置页手动开启，只监听 127.0.0.1，使用随机 Bearer token。连接方式见设置页；云端 ChatGPT 不能直接访问本机回环地址。
 
-在 Windows MSVC x64 Rust 环境：
+- window_info(target=game) 每次重新枚举 class=Bedrock、title=Minecraft 等有效窗口，支持属于其他 UWP 宿主 PID 的 HWND。返回句柄、PID、类名、标题与客户区大小，不再使用启动时的一次性过期缓存。
+- capture_window(target=devtools) 使用 DevTools 的 D3D11 GPU staging 读回生成 PNG。
+- capture_window(target=game) 目前实验性 PrintWindow，**不保证 RenderDragon/DX11/DX12/UWP 画面正确**；黑屏作为失败处理。完整游戏帧捕获仍需后续 WGC 或安全的 GPU 读回通道。
+- click_window(target=game,x=...,y=...) 默认使用 SendInput 模拟前台真实鼠标操作：尝试激活游戏、将客户区坐标转换为屏幕位置，再发送鼠标按下和释放。
+- click_window(target=game,mode=message,x=...,y=...) 使用旧版 PostMessage，便于比较 Raw Input 与 Win32 消息；游戏可能忽略此模式。
+- click_window(target=devtools,x=...,y=...) 默认使用 Win32 消息。
 
-```powershell
+**SendInput 只针对当前交互桌面的前台窗口，会改变真实桌面光标。** RDP 权限、UIPI、特殊全屏或游戏 Raw Input 可能限制其效果。调用结果只代表已提交，不代表游戏已处理；必须重新截屏/检查游戏状态确认。仅在授权的离线测试中开启自动点击，不要将 MCP 暴露到公网。
+
+## 编译与校验
+
+~~~powershell
 cargo test --target x86_64-pc-windows-msvc
 cargo build --release --target x86_64-pc-windows-msvc
-```
+~~~
 
-输出：`target/x86_64-pc-windows-msvc/release/bloader_devtools.dll`。必须与 `package/manifest.json` 同目录安装为 BL Mod。
+CI 对 Windows x64/MSVC 进行单元测试、Release DLL 构建并上传完整 BL Mod 安装包。**编译通过不等于 Minecraft 实机中的内存扫描、窗口捕获和点击验证通过。**
 
-GitHub Actions 构建会同时校验 manifest，并提供已按 `mods/bloader.devtools/` 打包的可安装产物。构建通过不代表已经完成 Minecraft Windows 实机的窗口显示和卸载测试。
-
-## 后续功能
-
-先完成安装/显示/启动日志等可靠性测试，再添加只读扫描、寄存器快照、断点采样与跨版本自动特征迁移。调试实验应首先限定在授权的离线单人环境。
-
-## 启动自动显示与远程验证
-
-v0.1.3 在 BL Mod `on_load` 后启动 UI 线程，成功创建 Win32 窗口就立即 `ShowWindow``，无需任何热键。仍支持 F8 作为可选操作。RDP 会话在同一个 Minecraft 进程内创建顶层 DevTools 窗口；无法识别游戏 HWND 时等待最多 3 秒后回退。子窗口无法创建或 D3D11 初始化失败时也尝试顶层模式。
-
-正常日志重点：`UI_THREAD_STARTED` → `GAME_HWND_FOUND` 或 `GAME_HWND_NOT_FOUND` / `REMOTE_SESSION_DETECTED` → `UI_WINDOW_CREATED` → `UI_WINDOW_SHOWN_BY_DEFAULT` → `UI_MODE_READY` → `UI_READY`。出现 `UI_THREAD_FAILED` 时根据 Win32/HRESULT 错误排查。如果日志达到 `UI_READY` 但远程串流看不到，请确认远程工具捕获的是整个桌面还是仅游戏画面。
-
-## 0.1.3：中文界面与 AI MCP 测试（实验性）
-
-- 中文工作台、系统 CJK 字体回退、深色/浅色主题、响应式工作台、原有 AOB 测试。
-- 全部在 Minecraft 游戏进程的 DLL 中运行，不安装独立 EXE；从“设置与关于”手动开启/关闭本机 MCP 服务。
-- 仅绑定 127.0.0.1 随机端口；32 字节随机 Bearer token 可由 DevTools 设置页复制；缺少 token 的连接拒绝。拒绝浏览器 Origin 头，阻止 DNS rebinding。**默认关闭，卸载时关闭。**
-- MCP Streamable HTTP 的工具包括 window_info、capture_window、click_window；target 支持 devtools 和 game，点击坐标是相对客户区像素。
-- 游戏截图当前使用 Windows GDI PrintWindow，**不能保证 RenderDragon/D3D/UWP 游戏画面可用**；黑屏或失败会返回工具错误，之后需要实现 D3D 图形读回或 Windows Graphics Capture。
-- 点击通过 Win32 窗口消息传送；Minecraft Raw Input 可能绕过此消息处理。不能根据“消息发送成功”判断游戏逻辑处理成功，必须重新截图验证。
-- 需要在本机 Codex 或其他支持 MCP HTTP + 自定义 Authorization 请求头的客户端中填入 DevTools 页面显示的 MCP 地址和 token。**ChatGPT 云端无法直接访问你电脑的 127.0.0.1。**
-- AI 识图由支持视觉的 MCP 客户端模型执行，DevTools 本身不做 OCR 或 LLM 推理。
-- MCP 仅用于本人有权控制的离线/单人游戏测试，不应向公网暴露，也不建议在不受信任 Mod 或多人服务器中开启。
-
-验证边界：GitHub Actions 只覆盖 Windows 编译、单元测试与发布打包；并不代表 MCP 游戏画面捕获、点击和实际 UI 显示已通过实机。
-
-### DevTools 自身窗口 GPU 截图
-
-MCP 截取 DevTools 自身 UI 时，走独立 D3D11 Swapchain 的按需 staging readback（帧绘制后、Present 前），不再依赖 PrintWindow。正常使用时不持续读回 GPU，只有 MCP capture_window(target=devtools) 才执行一次纹理复制、Map、PNG 编码；游戏窗口仍使用实验性 GDI 捕获，是否有效由调用结果提示。
+正式发布前仍需验证 Windows 原生显示、远程 RDP、UI 中文 IME、游戏窗口生命周期、读取与写入策略、模块卸载线程回收和游戏帧捕获。
