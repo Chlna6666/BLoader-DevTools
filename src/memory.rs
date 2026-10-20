@@ -13,7 +13,49 @@ use windows_sys::Win32::System::{
     Threading::GetCurrentProcess,
 };
 
-const MAX_SCAN_BYTES: usize = 128*1024*1024;
+pub const DEFAULT_SCAN_MIB: usize = 128;
+pub const MAX_SCAN_MIB: usize = 1024;
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum ScanScope { Writable, AllReadable, Executable }
+impl ScanScope {
+    pub const ALL:[Self;3]=[Self::Writable,Self::AllReadable,Self::Executable];
+    pub fn label(self)->&'static str {
+        match self {
+            Self::Writable=>"可写数据（默认）",
+            Self::AllReadable=>"全部可读",
+            Self::Executable=>"可执行代码",
+        }
+    }
+    fn accepts(self,protect:u32)->bool {
+        match self{
+            Self::Writable=>writable(protect),
+            Self::AllReadable=>readable(protect),
+            Self::Executable=>readable(protect) && matches!(protect&0xff,
+                PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)
+        }
+    }
+}
+#[derive(Debug,Clone,Copy)]
+pub struct ScanOptions {
+    pub scope:ScanScope,
+    pub budget_mib:usize,
+    pub start:usize,
+    pub end:usize,
+}
+impl Default for ScanOptions{
+    fn default()->Self{Self{scope:ScanScope::Writable,budget_mib:DEFAULT_SCAN_MIB,
+        start:0x10000,end:usize::MAX}}
+}
+impl ScanOptions{
+    pub fn validate(self)->Result<Self,String>{
+        if self.start<0x10000 || self.end<=self.start{return Err("扫描起止地址无效".into());}
+        if !(16..=MAX_SCAN_MIB).contains(&self.budget_mib){
+            return Err(format!("扫描预算必须在 16–{MAX_SCAN_MIB} MiB 之间"));
+        }
+        Ok(self)
+    }
+    fn byte_limit(self)->usize{self.budget_mib*1024*1024}
+}
 const BLOCK:usize = 256*1024;
 const MAX_RESULTS:usize=8192;
 
@@ -45,6 +87,20 @@ impl ValueKind {
             Self::F64=>f64::from_le_bytes(bytes[..8].try_into().unwrap()).to_string(),
         }
     }
+    pub fn compare(self,a:&[u8],b:&[u8])->std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match self {
+            Self::U8=>a[0].cmp(&b[0]),
+            Self::U32=>u32::from_le_bytes(a[..4].try_into().unwrap())
+                .cmp(&u32::from_le_bytes(b[..4].try_into().unwrap())),
+            Self::U64=>u64::from_le_bytes(a[..8].try_into().unwrap())
+                .cmp(&u64::from_le_bytes(b[..8].try_into().unwrap())),
+            _=>{
+                let (x,y)=(self.numeric(a),self.numeric(b));
+                x.partial_cmp(&y).unwrap_or(Ordering::Equal)
+            }
+        }
+    }
     fn numeric(self, bytes:&[u8])->f64 {
         match self {
             Self::U8=>bytes[0] as f64,
@@ -68,15 +124,18 @@ pub struct Hit {pub address:usize,pub bytes:Vec<u8>}
 #[derive(Clone,Debug)]
 pub enum Command {
     Scan(ValueKind,String),
+    ScanRange(ValueKind,String,ScanOptions),
     Refine(Filter,String),
     Read(usize,usize),
     Write {address:usize,kind:ValueKind,old:String,new:String},
     Disassemble(usize,usize),
     Aob(String),
+    AobRange(String,ScanOptions),
     Script(Vec<Command>),
     Modules,
     Compare{old:String,new:String,pattern:String},
     Reset,
+    Watch(Vec<(usize,ValueKind)>),
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -86,10 +145,11 @@ pub struct Report {
     pub kind:ValueKind,
     pub dump:Vec<u8>,
     pub dump_base:usize,
+    pub watch_values:Vec<(usize,ValueKind,String)>,
 }
 impl Report {
     fn new(title:&str,kind:ValueKind)->Self{
-        Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0}
+        Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new()}
     }
 }
 pub fn parse_address(raw:&str)->Result<usize,String>{
@@ -133,24 +193,30 @@ fn write_data(address:usize,old:&[u8],new:&[u8])->Result<(),String>{
 }
 #[derive(Clone,Copy)]
 struct Region{base:usize,len:usize}
-fn enumerate_regions(limit:usize)->Vec<Region>{
+fn enumerate_regions(options:ScanOptions)->Vec<Region>{
     let mut out=Vec::new();
-    let (mut address,mut bytes)=(0x10000usize,0usize);
-    while address<usize::MAX-0x10000 && bytes<limit && out.len()<12000 {
+    let (mut address,mut bytes)=(options.start,0usize);
+    let limit=options.byte_limit();
+    while address<options.end && bytes<limit && out.len()<250000 {
         let mut mbi:MEMORY_BASIC_INFORMATION=unsafe{mem::zeroed()};
         if unsafe{VirtualQuery(address as *const c_void,&mut mbi,mem::size_of::<MEMORY_BASIC_INFORMATION>())}==0{break}
-        let start=mbi.BaseAddress as usize;
-        let next=start.saturating_add(mbi.RegionSize);
+        let base=mbi.BaseAddress as usize;
+        let next=base.saturating_add(mbi.RegionSize);
         if next<=address{break}
-        if mbi.State==MEM_COMMIT && readable(mbi.Protect) && mbi.RegionSize>0 {
-            let length=mbi.RegionSize.min(limit-bytes);
-            out.push(Region{base:start,len:length});
-            bytes+=length;
+        if mbi.State==MEM_COMMIT && options.scope.accepts(mbi.Protect) && mbi.RegionSize>0 {
+            let actual_start=base.max(options.start);
+            let actual_end=next.min(options.end);
+            if actual_start<actual_end {
+                let length=(actual_end-actual_start).min(limit-bytes);
+                out.push(Region{base:actual_start,len:length});
+                bytes+=length;
+            }
         }
         address=next;
     }
     out
 }
+
 pub struct Engine{
     pub busy:bool,
     tx:Option<SyncSender<Command>>,
@@ -167,7 +233,6 @@ impl Engine {
         let handle=thread::Builder::new().name("bloader-devtools-scan".into()).spawn(move||{
             let mut state=ScanState::new(worker_cancel.clone());
             while let Ok(item)=cmd.recv() {
-                worker_cancel.store(false,Ordering::Release);
                 let report=state.execute(item);
                 if result.send(report).is_err(){break;}
             }
@@ -176,6 +241,7 @@ impl Engine {
     }
     pub fn submit(&mut self, cmd:Command)->Result<(),String>{
         if self.busy {return Err("后台任务尚未完成".into());}
+        self.cancel.store(false,Ordering::Release);
         self.tx.as_ref().ok_or("扫描线程无法启动")?.try_send(cmd).map_err(|e|match e {
             TrySendError::Full(_)=>"扫描队列已满".to_owned(),
             TrySendError::Disconnected(_)=>"扫描线程已停止".to_owned()
@@ -201,6 +267,17 @@ impl ScanState{
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::Watch(entries)=>{
+                let mut r=Report::new("地址监视刷新",self.kind);
+                for (address,kind) in entries.into_iter().take(64) {
+                    let value=match read(address,kind.size()){
+                        Ok(bytes)=>kind.display(&bytes),
+                        Err(_)=>"不可读".to_owned(),
+                    };
+                    r.watch_values.push((address,kind,value));
+                }
+                r
+            },
             Command::Modules => {
                 let mut r=Report::new("进程模块快照",self.kind);
                 r.lines=crate::inspection::modules();
@@ -260,12 +337,17 @@ impl ScanState {
                 r.lines.push(match outcome{Ok(())=>format!("已更新 0x{address:X}；请验证游戏实际效果"),Err(e)=>format!("拒绝写入：{e}")});
                 r
             }
-            Command::Scan(kind,text)=>{
+            Command::Scan(kind,text)=>self.execute(Command::ScanRange(kind,text,ScanOptions::default())),
+            Command::ScanRange(kind,text,options)=>{
+                let options=match options.validate(){
+                    Ok(opts)=>opts,
+                    Err(e)=>{let mut r=Report::new("首次精确扫描",kind);r.lines.push(e);return r;}
+                };
                 self.kind=kind;self.hits.clear();
                 let mut r=Report::new("首次精确扫描",kind);
                 let needle=match kind.encode(&text){Ok(b)=>b,Err(e)=>{r.lines.push(e);return r}};
                 let mut total=0usize;
-                'outer: for region in enumerate_regions(MAX_SCAN_BYTES) {
+                'outer: for region in enumerate_regions(options) {
                     if self.cancel.load(Ordering::Acquire){r.lines.push("用户取消扫描".into());break;}
                     let mut offset=0usize;
                     let mut overlap=Vec::new();
@@ -278,8 +360,9 @@ impl ScanState {
                             joined.extend_from_slice(&buffer);
                             let base=at-overlap.len();
                             for (i,bytes) in joined.windows(needle.len()).enumerate() {
-                                if bytes==needle {
-                                    self.hits.push(Hit{address:base+i,bytes:bytes.to_vec()});
+                                let hit_addr=base+i;
+                                if hit_addr%kind.size()==0 && bytes==needle {
+                                    self.hits.push(Hit{address:hit_addr,bytes:bytes.to_vec()});
                                     if self.hits.len()>=MAX_RESULTS{break 'outer}
                                 }
                             }
@@ -289,7 +372,8 @@ impl ScanState {
                         offset+=len;total+=len;
                     }
                 }
-                r.lines.push(format!("已扫描约 {} MiB，找到 {} 个候选（上限 {}）；受安全预算限制，仅扫描前 128 MiB 的可读区域",total/1048576,self.hits.len(),MAX_RESULTS));
+                r.lines.push(format!("已处理 {} MiB，候选 {} 项，上限 {}；区域={}；预算={} MiB",
+                    total/1048576,self.hits.len(),MAX_RESULTS,options.scope.label(),options.budget_mib));
                 r.hits=self.hits.clone();r
             }
             Command::Refine(filter,text)=>{
@@ -306,21 +390,23 @@ impl ScanState {
                         Filter::Exact=>target.as_ref().is_some_and(|bytes|*bytes==now),
                         Filter::Changed=>now!=hit.bytes,
                         Filter::Unchanged=>now==hit.bytes,
-                        Filter::Increased=>kind.numeric(&now)>kind.numeric(&hit.bytes),
-                        Filter::Decreased=>kind.numeric(&now)<kind.numeric(&hit.bytes),
+                        Filter::Increased=>kind.compare(&now,&hit.bytes).is_gt(),
+                        Filter::Decreased=>kind.compare(&now,&hit.bytes).is_lt(),
                     };
                     if keep{hit.bytes=now}keep
                 });
                 r.hits=self.hits.clone();
                 r.lines.push(format!("过滤后剩余 {} 个候选",r.hits.len()));r
             }
-            Command::Aob(pattern)=>{
+            Command::Aob(pattern)=>self.execute(Command::AobRange(pattern,ScanOptions{scope:ScanScope::AllReadable,..Default::default()})),
+            Command::AobRange(pattern,options)=>{
                 let mut r=Report::new("游戏内特征扫描",self.kind);
+                let options=match options.validate(){Ok(v)=>v,Err(e)=>{r.lines.push(e);return r;}};
                 let pat=match crate::signature::Pattern::parse(&pattern){
                     Ok(p)=>p,Err(e)=>{r.lines.push(e.into());return r}
                 };
                 let mut total=0usize;
-                'outer:for region in enumerate_regions(MAX_SCAN_BYTES) {
+                'outer:for region in enumerate_regions(options) {
                     if self.cancel.load(Ordering::Acquire){r.lines.push("用户取消扫描".into());break;}
                     let mut offset=0usize;
                     let mut overlap=Vec::new();
@@ -340,7 +426,8 @@ impl ScanState {
                         offset+=n;total+=n;
                     }
                 }
-                r.lines.push(format!("AOB 匹配 {} 项；已扫描 {} MiB",r.hits.len(),total/1048576));
+                r.lines.push(format!("AOB 匹配 {} 项；已处理 {} MiB；范围={}，预算={} MiB",
+                    r.hits.len(),total/1048576,options.scope.label(),options.budget_mib));
                 r
             }
         }
@@ -351,6 +438,15 @@ mod tests{
     use super::*;
     #[test]fn parse_addresses(){assert_eq!(parse_address("0xAB_CD").unwrap(),0xABCD);}
     #[test]fn values(){assert_eq!(ValueKind::F32.encode("1.5").unwrap(),1.5f32.to_le_bytes());}
+    #[test]fn large_u64_order_is_exact(){
+        let lo=(1u64<<60).to_le_bytes();
+        let hi=((1u64<<60)+1).to_le_bytes();
+        assert!(ValueKind::U64.compare(&hi,&lo).is_gt());
+    }
+    #[test]fn options_reject_invalid_bounds(){
+        assert!(ScanOptions{start:0x20000,end:0x10000,..Default::default()}.validate().is_err());
+        assert!(ScanOptions{budget_mib:2048,..Default::default()}.validate().is_err());
+    }
 }
 
 pub fn hex_bytes(data:&[u8])->String {

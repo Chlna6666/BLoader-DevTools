@@ -2,11 +2,13 @@
 //! All memory access, disassembly and script execution live inside DevTools,
 //! never in BLoader and never on the game/render thread.
 use crate::{
-    memory::{self,Command,Engine,Filter,Hit,ValueKind},
+    memory::{self,Command,Engine,Filter,Hit,ValueKind,ScanScope,ScanOptions},
     signature::{Pattern,decode_hex},
 };
 use egui::{Align,Color32,FontFamily,FontId,Frame,Layout,RichText,ScrollArea,Stroke,TextEdit,Ui,Vec2};
-use std::collections::VecDeque;
+use std::{collections::VecDeque,time::{Duration,Instant}};
+#[derive(Clone)]
+struct Watch { address:usize,kind:ValueKind,value:String }
 
 const ACCENT:Color32=Color32::from_rgb(99,153,250);
 const GREEN:Color32=Color32::from_rgb(79,204,162);
@@ -107,6 +109,16 @@ pub struct Workbench {
     right_width:f32,
     bottom_height:f32,
     selected_hit:Option<usize>,
+    hit_page:usize,
+    scan_scope:ScanScope,
+    scan_budget:usize,
+    start_addr:String,
+    end_addr:String,
+    watches:Vec<Watch>,
+    watch_due:Instant,
+    show_explorer:bool,
+    show_inspector:bool,
+    show_console:bool,
 }
 impl Default for Workbench{
     fn default()->Self{
@@ -124,12 +136,15 @@ impl Default for Workbench{
             script:crate::project::load_script().unwrap_or_else(|_|crate::script::EXAMPLE.into()),
             script_writes:false,old_file:String::new(),new_file:String::new(),
             dark:true,left_width:178.,right_width:215.,bottom_height:142.,
-            selected_hit:None
+            selected_hit:None,hit_page:0,scan_scope:ScanScope::Writable,
+            scan_budget:128,start_addr:"0x10000".into(),end_addr:"最大地址".into(),
+            watches:Vec::new(),watch_due:Instant::now(),
+            show_explorer:true,show_inspector:true,show_console:true,
         }
     }
 }
 impl Workbench{
-    pub fn needs_poll(&self)->bool{self.engine.busy}
+    pub fn needs_poll(&self)->bool{self.engine.busy || !self.watches.is_empty()}
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
     fn panel(&self)->Color32{if self.dark{PANEL}else{Color32::WHITE}}
     fn muted(&self)->Color32{if self.dark{MUTED}else{Color32::from_rgb(83,96,113)}}
@@ -143,19 +158,50 @@ impl Workbench{
             Err(err)=>self.log(format!("无法提交任务：{err}"))
         }
     }
+    fn scan_options(&self)->Result<ScanOptions,String>{
+        let start=memory::parse_address(&self.start_addr)?;
+        let end=if self.end_addr.trim()=="最大地址" || self.end_addr.trim().is_empty(){
+            usize::MAX
+        }else{memory::parse_address(&self.end_addr)?};
+        ScanOptions{start,end,scope:self.scan_scope,budget_mib:self.scan_budget}.validate()
+    }
+    fn add_watch(&mut self,address:usize){
+        if self.watches.iter().any(|x|x.address==address){self.log("地址已在监视列表");return;}
+        if self.watches.len()>=64{self.log("最多监视 64 个地址");return;}
+        self.watches.push(Watch{address,kind:self.value_kind,value:"等待刷新".into()});
+        self.watch_due=Instant::now()-Duration::from_secs(1);
+    }
     fn poll(&mut self){
         if let Some(report)=self.engine.poll(){
-            self.log(format!("{} · {}",report.title,report.lines.len()));
-            for line in &report.lines {self.log(line.clone());}
+            if report.title=="地址监视刷新" {
+                for (address,kind,value) in report.watch_values {
+                    if let Some(w)=self.watches.iter_mut().find(|w|w.address==address && w.kind==kind){
+                        w.value=value;
+                    }
+                }
+            } else {
+                self.log(format!("{} · {}",report.title,report.lines.len()));
+                for line in &report.lines {self.log(line.clone());}
+            }
             match report.title.as_str(){
                 "首次精确扫描"|"再次扫描"|"游戏内特征扫描"|"脚本执行结果"=>{
                     self.hits=report.hits;
                     self.selected_hit=None;
+                    self.hit_page=0;
+                    if !self.hits.first().is_some_and(|h|h.bytes.is_empty()) {
+                        self.value_kind=report.kind;
+                    }
                 },
                 "十六进制查看"=>{self.dump=report.dump;self.dump_base=report.dump_base;},
                 "反汇编"|"跨版本 AOB 对比"=>{self.result_lines=report.lines;},
                 "进程模块快照"=>{self.module_lines=report.lines;},
                 _=>{}
+            }
+        }
+        if !self.engine.busy && !self.watches.is_empty() && self.watch_due.elapsed()>=Duration::from_millis(700) {
+            let values=self.watches.iter().map(|w|(w.address,w.kind)).collect();
+            if self.engine.submit(Command::Watch(values)).is_ok(){
+                self.watch_due=Instant::now();
             }
         }
     }
@@ -164,9 +210,9 @@ impl Workbench{
         let viewport=ui.available_size();
         let width=viewport.x.max(320.);
         let height=viewport.y.max(320.);
-        let left=self.left_width.min((width*0.30).max(130.));
-        let right=if width>900.{self.right_width.min(width*0.24)}else{0.};
-        let bottom=self.bottom_height.min(height*0.32);
+        let left=if self.show_explorer && width>600. {self.left_width.min(width*0.27)}else{0.};
+        let right=if self.show_inspector && width>850. {self.right_width.min(width*0.26)}else{0.};
+        let bottom=if self.show_console{self.bottom_height.min(height*0.32)}else{0.};
         // Primary toolbar / breadcrumb.
         ui.allocate_ui_with_layout(Vec2::new(width,43.),Layout::left_to_right(Align::Center),|ui|{
             ui.add_space(12.);
@@ -176,6 +222,9 @@ impl Workbench{
             ui.label(RichText::new("Minecraft Bedrock").color(self.muted()));
             ui.label(RichText::new(" / ").color(self.muted()));
             ui.label(self.tab.name());
+            if ui.small_button(if self.show_explorer{"隐藏项目"}else{"项目"}).clicked(){self.show_explorer=!self.show_explorer;}
+            if ui.small_button(if self.show_inspector{"隐藏检查器"}else{"检查器"}).clicked(){self.show_inspector=!self.show_inspector;}
+            if ui.small_button(if self.show_console{"隐藏控制台"}else{"控制台"}).clicked(){self.show_console=!self.show_console;}
             ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
                 if ui.button("设置").clicked(){self.tab=Tab::Settings;}
                 if self.engine.busy {ui.spinner();ui.label("后台任务中");if ui.button("取消任务").clicked(){self.engine.cancel();}}
@@ -183,12 +232,14 @@ impl Workbench{
             });
         });
         ui.separator();
-        let main_height=(height-bottom-96.).max(160.);
+        let main_height=(height-bottom-97.).max(120.);
         ui.allocate_ui_with_layout(Vec2::new(width,main_height),Layout::left_to_right(Align::Min),|ui|{
-            ui.allocate_ui_with_layout(Vec2::new(left,main_height),Layout::top_down(Align::Min),|ui|{
-                self.left_panel(ui);
-            });
-            ui.separator();
+            if left>0.{
+                ui.allocate_ui_with_layout(Vec2::new(left,main_height),Layout::top_down(Align::Min),|ui|{
+                    self.left_panel(ui);
+                });
+                ui.separator();
+            }
             let mid=(width-left-right-19.).max(180.);
             ui.allocate_ui_with_layout(Vec2::new(mid,main_height),Layout::top_down(Align::Min),|ui|{
                 self.editor(ui);
@@ -200,10 +251,12 @@ impl Workbench{
                 });
             }
         });
-        ui.separator();
-        ui.allocate_ui_with_layout(Vec2::new(width,bottom),Layout::top_down(Align::Min),|ui|{
-            self.bottom_panel(ui);
-        });
+        if bottom>0.{
+            ui.separator();
+            ui.allocate_ui_with_layout(Vec2::new(width,bottom),Layout::top_down(Align::Min),|ui|{
+                self.bottom_panel(ui);
+            });
+        }
         ui.separator();
         ui.horizontal(|ui|{
             ui.add_space(10.);
@@ -273,7 +326,21 @@ impl Workbench{
     }
     fn memory_editor(&mut self,ui:&mut Ui){
         ui.heading("内存扫描");
-        ui.label(RichText::new("本游戏进程地址空间 · 上限 128 MiB / 8192 个候选，后台执行").color(self.muted()).small());
+        ui.label(RichText::new("按指定权限扫描本游戏进程，工作线程运行；可限制地址区间与读取预算").color(self.muted()).small());
+        ui.horizontal_wrapped(|ui|{
+            egui::ComboBox::from_id_salt("scan_scope")
+                .selected_text(self.scan_scope.label()).show_ui(ui,|ui|{
+                    for scope in ScanScope::ALL {ui.selectable_value(&mut self.scan_scope,scope,scope.label());}
+                });
+            ui.label("预算 MiB");
+            ui.add(egui::DragValue::new(&mut self.scan_budget).range(16..=1024).speed(8));
+        });
+        ui.horizontal_wrapped(|ui|{
+            ui.label("起始");
+            ui.add(TextEdit::singleline(&mut self.start_addr).desired_width(160.));
+            ui.label("结束");
+            ui.add(TextEdit::singleline(&mut self.end_addr).desired_width(165.));
+        });
         ui.add_space(6.);
         ui.horizontal_wrapped(|ui|{
             ui.label("数据类型");
@@ -285,7 +352,10 @@ impl Workbench{
         });
         ui.horizontal_wrapped(|ui|{
             if ui.add_enabled(!self.engine.busy,egui::Button::new("首次扫描")).clicked(){
-                self.job(Command::Scan(self.value_kind,self.scan_value.clone()));
+                match self.scan_options(){
+                    Ok(opt)=>self.job(Command::ScanRange(self.value_kind,self.scan_value.clone(),opt)),
+                    Err(e)=>self.log(format!("扫描范围错误：{e}")),
+                }
             }
             egui::ComboBox::from_id_salt("filter").selected_text(self.filter.label()).show_ui(ui,|ui|{
                 for f in Filter::ALL{ui.selectable_value(&mut self.filter,f,f.label());}
@@ -306,12 +376,20 @@ impl Workbench{
                 }
             }
         });
+        let pages=self.hits.len().div_ceil(100).max(1);
+        self.hit_page=self.hit_page.min(pages-1);
+        ui.horizontal(|ui|{
+            if ui.add_enabled(self.hit_page>0,egui::Button::new("上一页")).clicked(){self.hit_page-=1;}
+            ui.label(format!("第 {} / {} 页（每页 100 条）",self.hit_page+1,pages));
+            if ui.add_enabled(self.hit_page+1<pages,egui::Button::new("下一页")).clicked(){self.hit_page+=1;}
+        });
         egui::Grid::new("hits_table").striped(true).num_columns(3).show(ui,|ui|{
             ui.strong("地址");ui.strong("上次值");ui.strong("操作");ui.end_row();
-            for i in 0..self.hits.len().min(200) {
+            let start=self.hit_page*100;
+            for i in start..(start+100).min(self.hits.len()) {
                 let hit=&self.hits[i];
                 let address=hit.address;
-                let value=self.value_kind.display(&hit.bytes);
+                let value=if hit.bytes.is_empty(){"AOB 匹配".into()}else{self.value_kind.display(&hit.bytes)};
                 if ui.selectable_label(self.selected_hit==Some(i),format!("0x{address:016X}")).clicked(){
                     self.selected_hit=Some(i);self.address=format!("0x{address:X}");
                 }
@@ -323,7 +401,7 @@ impl Workbench{
                 ui.end_row();
             }
         });
-        if self.hits.len()>200{ui.label(RichText::new("表格显示前 200 项。再次筛选可减少候选。").color(self.muted()).small());}
+        if self.hits.len()>=8192{ui.label(RichText::new("达到 8192 条结果上限，建议缩小范围或再次筛选。").color(self.muted()).small());}
     }
     fn hex_editor(&mut self,ui:&mut Ui){
         ui.heading("十六进制查看器");
@@ -376,7 +454,10 @@ impl Workbench{
                 }
             }
             if ui.add_enabled(!self.engine.busy,egui::Button::new("扫描游戏内存")).clicked(){
-                self.job(Command::Aob(self.aob.clone()));
+                match self.scan_options(){
+                    Ok(opt)=>self.job(Command::AobRange(self.aob.clone(),opt)),
+                    Err(e)=>self.log(format!("AOB 扫描范围错误：{e}")),
+                }
             }
             if ui.button("复制标准特征").clicked(){
                 match Pattern::parse(&self.aob){Ok(p)=>ui.ctx().copy_text(p.canonical()),
@@ -496,6 +577,13 @@ impl Workbench{
             egui::ComboBox::from_id_salt("inspector_kind").selected_text(self.value_kind.label()).show_ui(ui,|ui|{
                 for kind in ValueKind::ALL{ui.selectable_value(&mut self.value_kind,kind,kind.label());}
             });
+            if ui.button("将地址加入监视").clicked(){
+                match memory::parse_address(&self.address){
+                    Ok(address)=>self.add_watch(address),
+                    Err(e)=>self.log(e)
+                }
+            }
+            ui.separator();
             ui.label("预期旧值");
             ui.add(TextEdit::singleline(&mut self.write_old).desired_width(f32::INFINITY));
             ui.label("新值");
@@ -511,11 +599,22 @@ impl Workbench{
                 self.write_armed=false;
             }
             ui.separator();
+            ui.strong(format!("实时地址监视（{} / 64）",self.watches.len()));
+            let mut remove=None;
+            for (i,w) in self.watches.iter().enumerate(){
+                ui.horizontal(|ui|{
+                    ui.monospace(format!("0x{:X}",w.address));
+                    ui.label(&w.value);
+                    if ui.small_button("×").clicked(){remove=Some(i);}
+                });
+            }
+            if let Some(i)=remove{self.watches.remove(i);}
+            ui.separator();
             ui.label(RichText::new("只改写已可写的数据页；若旧值变化将拒绝写入。").small().color(self.muted()));
             if let Some(i)=self.selected_hit {
                 if let Some(hit)=self.hits.get(i){
                     ui.label(format!("选中：0x{:X}",hit.address));
-                    ui.label(self.value_kind.display(&hit.bytes));
+                    ui.label(if hit.bytes.is_empty(){"AOB 匹配".to_owned()}else{self.value_kind.display(&hit.bytes)});
                 }
             }
         });
