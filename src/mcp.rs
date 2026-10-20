@@ -290,14 +290,14 @@ fn click_with_input(hwnd:HWND,x:i32,y:i32)->Result<(),String>{
     }
     let mut down:INPUT=unsafe {mem::zeroed()};
     down.r#type=INPUT_MOUSE;
-    unsafe{down.Anonymous.mi.dwFlags=MOUSEEVENTF_LEFTDOWN;}
+    down.Anonymous.mi.dwFlags=MOUSEEVENTF_LEFTDOWN;
     if unsafe{SendInput(1,&down,mem::size_of::<INPUT>() as i32)}!=1{
         return Err("SendInput 按下失败；可能受到桌面会话权限或 UIPI 限制".into());
     }
     std::thread::sleep(Duration::from_millis(45));
     let mut up:INPUT=unsafe {mem::zeroed()};
     up.r#type=INPUT_MOUSE;
-    unsafe{up.Anonymous.mi.dwFlags=MOUSEEVENTF_LEFTUP;}
+    up.Anonymous.mi.dwFlags=MOUSEEVENTF_LEFTUP;
     if unsafe{SendInput(1,&up,mem::size_of::<INPUT>() as i32)}!=1{
         return Err("SendInput 释放失败；请检查是否有鼠标按键状态滞留".into());
     }
@@ -339,15 +339,22 @@ fn call_tool(request:&Value) -> Value {
                 )}]}))
             },
             "capture_window" => {
-                let image = if target == "devtools" {
-                    capture_devtools_gpu()?
-                } else {
-                    capture_gdi(hwnd,width,height)?
+                let (image,out_width,out_height,method)=if target=="devtools" {
+                    if args.get("mode").and_then(Value::as_str).is_some_and(|m|m!="auto") {
+                        return Err("DevTools UI 只能通过 GPU 读回截图".into());
+                    }
+                    (capture_devtools_gpu()?,width,height,"d3d11")
+                }else{
+                    let mode=crate::capture::Mode::parse(args.get("mode").and_then(Value::as_str))?;
+                    let got=crate::capture::capture(hwnd,width,height,mode)?;
+                    (got.png,got.width,got.height,got.method)
                 };
                 Ok(json!({"content":[
-                    {"type":"text","text":format!("target={target}; width={width}; height={height}; capture={}",
-                        if target == "devtools" { "Direct3D11 GPU readback" } else { "PrintWindow experimental" })}
-                    ,{"type":"image","mimeType":"image/png","data":STANDARD.encode(image)}
+                    {"type":"text","text":format!(
+                        "target={target}, client={width}x{height}, output={}x{}, capture={method}；点击仍使用原始客户区坐标。",
+                        out_width,out_height
+                    )},
+                    {"type":"image","mimeType":"image/png","data":STANDARD.encode(image)}
                 ]}))
             },
             "click_window" => {
