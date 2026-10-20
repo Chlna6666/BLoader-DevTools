@@ -637,6 +637,14 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     pending_captures.push(reply);
                     mark_dirty(None);
                 }
+                crate::mcp::UiCommand::QueryState(reply)=>{
+                    let _=reply.send(workbench.status_summary());
+                }
+                crate::mcp::UiCommand::Navigate(tool,reply)=>{
+                    let result=workbench.navigate(&tool);
+                    let _=reply.send(result);
+                    mark_dirty(None);
+                }
             }
         }
 

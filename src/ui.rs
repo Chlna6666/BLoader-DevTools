@@ -144,6 +144,26 @@ impl Default for Workbench{
     }
 }
 impl Workbench{
+    pub fn navigate(&mut self,name:&str)->Result<String,String>{
+        self.tab=match name.trim().to_ascii_lowercase().as_str(){
+            "memory"|"scan"|"内存扫描"=>Tab::Memory,
+            "hex"|"十六进制"=>Tab::Hex,
+            "disasm"|"反汇编"=>Tab::Disasm,
+            "signature"|"aob"|"特征"=>Tab::Signature,
+            "script"|"脚本"=>Tab::Script,
+            "migration"|"迁移"=>Tab::Migration,
+            "hooks"|"modules"|"模块"=>Tab::Hooks,
+            "settings"|"设置"=>Tab::Settings,
+            _=>return Err(format!("未知工作台工具标签：{name}")),
+        };
+        Ok(format!("已在 UI 线程切换到：{}",self.tab.name()))
+    }
+    pub fn status_summary(&self)->String{
+        let recent=self.console.iter().rev().take(5).cloned().collect::<Vec<_>>();
+        format!("tool={} busy={} candidates={} watches={} explorer={} inspector={} console={} recent_logs={:?}",
+            self.tab.name(),self.engine.busy,self.hits.len(),self.watches.len(),
+            self.show_explorer,self.show_inspector,self.show_console,recent)
+    }
     pub fn needs_poll(&self)->bool{self.engine.busy || !self.watches.is_empty()}
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
     fn panel(&self)->Color32{if self.dark{PANEL}else{Color32::WHITE}}
@@ -207,6 +227,18 @@ impl Workbench{
     }
     pub fn ui(&mut self,ui:&mut Ui){
         self.poll();
+        // IDE keyboard navigation. The game receives no extra global hotkeys.
+        let shortcuts=[
+            (egui::Key::Num1,"memory"),(egui::Key::Num2,"hex"),
+            (egui::Key::Num3,"disasm"),(egui::Key::Num4,"signature"),
+            (egui::Key::Num5,"script"),(egui::Key::Num6,"migration"),
+            (egui::Key::Num7,"hooks"),(egui::Key::Num8,"settings"),
+        ];
+        for (key,tool) in shortcuts {
+            if ui.input(|input|input.modifiers.ctrl && input.key_pressed(key)){
+                let _=self.navigate(tool);
+            }
+        }
         let viewport=ui.available_size();
         let width=viewport.x.max(320.);
         let height=viewport.y.max(320.);
@@ -222,6 +254,7 @@ impl Workbench{
             ui.label(RichText::new("Minecraft Bedrock").color(self.muted()));
             ui.label(RichText::new(" / ").color(self.muted()));
             ui.label(self.tab.name());
+            ui.label(RichText::new("Ctrl+1…8").small().color(self.muted()));
             if ui.small_button(if self.show_explorer{"隐藏项目"}else{"项目"}).clicked(){self.show_explorer=!self.show_explorer;}
             if ui.small_button(if self.show_inspector{"隐藏检查器"}else{"检查器"}).clicked(){self.show_inspector=!self.show_inspector;}
             if ui.small_button(if self.show_console{"隐藏控制台"}else{"控制台"}).clicked(){self.show_console=!self.show_console;}
@@ -256,6 +289,16 @@ impl Workbench{
             ui.allocate_ui_with_layout(Vec2::new(width,bottom),Layout::top_down(Align::Min),|ui|{
                 self.bottom_panel(ui);
             });
+        }
+        // On narrow game windows keep the address inspector accessible.
+        if self.show_inspector && width<=850. {
+            let mut open=true;
+            let ctx=ui.ctx().clone();
+            egui::Window::new("地址检查器")
+                .id(egui::Id::new("compact_inspector"))
+                .open(&mut open).resizable(true).default_width(275.)
+                .show(&ctx,|ui|self.inspector(ui));
+            if !open {self.show_inspector=false;}
         }
         ui.separator();
         ui.horizontal(|ui|{

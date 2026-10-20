@@ -43,6 +43,8 @@ static SERVER: Mutex<Option<Connection>> = Mutex::new(None);
 /// Capture commands are processed only on the DevTools-owned D3D11/UI thread.
 pub(crate) enum UiCommand {
     Capture(SyncSender<Result<Vec<u8>, String>>),
+    QueryState(SyncSender<String>),
+    Navigate(String,SyncSender<Result<String,String>>),
 }
 static UI_COMMANDS: Mutex<VecDeque<UiCommand>> = Mutex::new(VecDeque::new());
 
@@ -50,16 +52,18 @@ pub(crate) fn drain_ui_commands() -> Vec<UiCommand> {
     UI_COMMANDS.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default()
 }
 
-fn capture_devtools_gpu() -> Result<Vec<u8>, String> {
-    if window::ui_hwnd() == 0 { return Err("DevTools UI 尚未创建".into()); }
-    let (sender, receiver) = mpsc::sync_channel(1);
+fn ui_request<T>(make:impl FnOnce(SyncSender<T>)->UiCommand)->Result<T,String>{
+    if window::ui_hwnd()==0 {return Err("DevTools UI 尚未创建".into());}
+    let (sender,receiver)=mpsc::sync_channel(1);
     {
-        let mut queue = UI_COMMANDS.lock().map_err(|_| "UI 命令队列已损坏")?;
-        if queue.len() >= 4 { return Err("UI 截图队列已满".into()); }
-        queue.push_back(UiCommand::Capture(sender));
+        let mut queue=UI_COMMANDS.lock().map_err(|_|"UI 命令队列已损坏")?;
+        if queue.len()>=8{return Err("UI 命令队列已满".into());}
+        queue.push_back(make(sender));
     }
-    receiver.recv_timeout(Duration::from_secs(4))
-        .map_err(|_| "UI GPU 截图超时，请检查渲染线程是否正在执行")?
+    receiver.recv_timeout(Duration::from_secs(4)).map_err(|_|"UI 操作响应超时".into())
+}
+fn capture_devtools_gpu() -> Result<Vec<u8>, String> {
+    ui_request(UiCommand::Capture)?
 }
 const MAX_REQUEST_BYTES: usize = 65536;
 const MAX_IMAGE_PIXELS: usize = 1920 * 1080;
@@ -210,6 +214,16 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
         "ping" => json!({}),
         "tools/list" => json!({"tools": [
             {
+                "name":"devtools_state",
+                "description":"从真实 egui UI 线程查询当前工具标签、扫描状态、候选数量、监视地址和最后几条控制台日志。",
+                "inputSchema":{"type":"object","properties":{}}
+            },
+            {
+                "name":"devtools_navigate",
+                "description":"在真实 DevTools UI 线程切换编辑器标签，支持 memory/hex/disasm/signature/script/migration/hooks/settings。",
+                "inputSchema":{"type":"object","properties":{"tab":{"type":"string"}},"required":["tab"]}
+            },
+            {
                 "name":"window_info",
                 "description":"查询 DevTools 或 Minecraft 当前窗口尺寸、可见性和句柄（不执行点击）",
                 "inputSchema":{"type":"object","properties":{"target":{"type":"string","enum":["devtools","game"]}},"required":["target"]}
@@ -303,6 +317,16 @@ fn call_tool(request:&Value) -> Value {
     let name=params["name"].as_str().unwrap_or("");
     let args=&params["arguments"];
     let result: Result<Value,String> = (|| {
+        if name=="devtools_state" {
+            let state=ui_request(UiCommand::QueryState)?;
+            return Ok(json!({"content":[{"type":"text","text":state}]}));
+        }
+        if name=="devtools_navigate" {
+            let tab=args["tab"].as_str().ok_or("缺少 tab 参数")?;
+            if tab.len()>32{return Err("标签名称过长".into());}
+            let result=ui_request(|reply|UiCommand::Navigate(tab.to_owned(),reply))??;
+            return Ok(json!({"content":[{"type":"text","text":result}]}));
+        }
         let target = args["target"].as_str().ok_or("缺少 target 参数")?;
         let hwnd = target_hwnd(target)?;
         let (width,height)=rect(hwnd)?;
