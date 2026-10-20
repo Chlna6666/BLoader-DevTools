@@ -80,6 +80,6 @@ GitHub Actions 构建会同时校验 manifest，并提供已按 `mods/bloader.de
 
 ## 启动自动显示与远程验证
 
-v0.1.2 在 BL Mod `on_load` 后启动 UI 线程，成功创建 Win32 窗口就立即 `ShowWindow` 和 `UpdateWindow`，无需任何热键。仍支持 F8 作为可选操作。RDP 会话在同一个 Minecraft 进程内创建顶层 DevTools 窗口；无法识别游戏 HWND 时等待最多 3 秒后回退。子窗口无法创建或 D3D11 初始化失败时也尝试顶层模式。
+v0.1.2 在 BL Mod `on_load` 后启动 UI 线程，成功创建 Win32 窗口就立即 `ShowWindow``，无需任何热键。仍支持 F8 作为可选操作。RDP 会话在同一个 Minecraft 进程内创建顶层 DevTools 窗口；无法识别游戏 HWND 时等待最多 3 秒后回退。子窗口无法创建或 D3D11 初始化失败时也尝试顶层模式。
 
 正常日志重点：`UI_THREAD_STARTED` → `GAME_HWND_FOUND` 或 `GAME_HWND_NOT_FOUND` / `REMOTE_SESSION_DETECTED` → `UI_WINDOW_CREATED` → `UI_WINDOW_SHOWN_BY_DEFAULT` → `UI_MODE_READY` → `UI_READY`。出现 `UI_THREAD_FAILED` 时根据 Win32/HRESULT 错误排查。如果日志达到 `UI_READY` 但远程串流看不到，请确认远程工具捕获的是整个桌面还是仅游戏画面。
