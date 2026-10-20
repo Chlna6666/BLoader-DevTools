@@ -1,4 +1,4 @@
-name: Windows MSVC DLL
+name: Windows MSVC BL Mod
 
 on:
   push:
@@ -16,13 +16,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - name: Verify BL manifest
+        shell: pwsh
+        run: |
+          $m = Get-Content package/manifest.json -Raw | ConvertFrom-Json
+          $p = Get-Content Cargo.toml -Raw
+          if ($m.type -cne "BL" -or $m.api_version -ne 1 -or $m.entry -cne "bloader_devtools.dll") { throw "Invalid BLoader BL v1 manifest" }
+          if ($p -notmatch ('(?m)^version\s*=\s*"' + [regex]::Escape($m.version) + '"')) { throw "Manifest and Cargo version differ" }
       - name: Unit tests
         run: cargo test --target x86_64-pc-windows-msvc
       - name: Build release DLL
         run: cargo build --release --target x86_64-pc-windows-msvc
-      - name: Upload DLL
+      - name: Stage installable BL Mod package
+        shell: pwsh
+        run: |
+          $dir = "dist/mods/bloader.devtools"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "package/manifest.json" "$dir/manifest.json"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/bloader_devtools.dll" "$dir/bloader_devtools.dll"
+          Write-Host "Installable package: $dir"
+      - name: Upload installable mod
         uses: actions/upload-artifact@v4
         with:
           name: bloader-devtools-windows-x64
-          path: target/x86_64-pc-windows-msvc/release/bloader_devtools.dll
+          path: dist/
           if-no-files-found: error

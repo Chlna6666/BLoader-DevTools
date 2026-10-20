@@ -1,35 +1,76 @@
 # BLoader DevTools
 
-Minecraft Bedrock 原生 Mod 开发工具。**纯 DLL**，通过 BLoader 的 BL Mod ABI v1 加载，不启动独立 EXE。
+BLoader DevTools 是在 Minecraft Bedrock 进程内运行的开源 BL Mod，使用 Rust + egui + DirectX 11。没有独立 UI EXE；UI 由 DLL 自行创建，使用独立的 Win32 子窗口与消息/渲染线程。
 
-## 首版界面架构
+- 版本：0.1.1
+- 作者：Chlna6666
+- 协议：GPL-3.0-only
+- 源码：https://github.com/Chlna6666/BLoader-DevTools
 
-- BLoader 在初始化 BL Mod 后调用 on_load；只创建轻量控制线程，不在 DllMain 初始化 GUI。
-- 工作线程寻找同一 PID 的 Minecraft 主窗口，创建 **Win32 子窗口**（窗口仍属于游戏进程），独立处理 Win32 消息、egui UI 和 D3D11 绘制。
-- 使用原生 Win32 消息循环 + egui 0.35 + egui-directx11，独立 D3D11 Device/Swapchain，不改写游戏 Present，不依赖游戏 D3D11/D3D12 设备；不初始化 winit，避免其 Raw Input 注册与 Minecraft 冲突。
-- **F8** 切换子窗口；关闭按钮隐藏 UI；卸载 Mod 时通知并等待 UI 线程退出。
-- 当前提供可操作的多个工具页面与离线 AOB 匹配验证。内存扫描、硬件断点、注入 Hook 和跨版本迁移仍是后续阶段，界面明确标注未实现，不会写游戏内存。
+## 安装（重要：不能只复制裸 DLL）
+
+**BLoader 的裸 DLL 自动打包规则会把它归类为 `preload-native`，这种加载方式仅调用 `LoadLibrary`，不会执行 `bl_mod_main_v1` / `on_load`。因此旧版只有 DLL 的压缩包会造成“加载了却没有窗口和 DevTools 日志”的现象。**
+
+请在 [Actions Windows 构建页面](https://github.com/Chlna6666/BLoader-DevTools/actions/workflows/windows-build.yml) 下载最新的 `bloader-devtools-windows-x64`，解压后把目录完整放进**正在运行的游戏版本目录**。目标结构：
+
+```text
+Minecraft 游戏版本目录/
+└── mods/
+    └── bloader.devtools/
+        ├── manifest.json       # type 必须为 "BL"
+        └── bloader_devtools.dll
+```
+
+也可以从仓库 `package/manifest.json` 复制清单，并将对应新版本 Release DLL 放在同一目录。**不要只把 DLL 放在 mods 根目录。**
+
+如果之前已经安装了 `mods/bloader_devtools/` 自动生成的旧包（`manifest.json` 中 `type=preload-native`），请先移除旧包，避免重复加载或沿用错误的入口类型。
+
+## 控制台诊断
+
+加载成功时应先看到 BLoader 的 `Loading BL Mod: BLoader DevTools`，随后看到 DevTools 自己的：
+
+```text
+[BLoader DevTools] v0.1.1 | Windows x64
+[BLoader DevTools] Author: Chlna6666
+[BLoader DevTools] License: GPL-3.0-only (open source)
+[BLoader DevTools] Source: https://github.com/Chlna6666/BLoader-DevTools
+[BLoader DevTools] UI: in-process Win32 child + egui + D3D11
+[BLoader DevTools] UI worker started; UI_READY will be logged after the first Present
+[BLoader DevTools] UI_THREAD_STARTED; searching for Minecraft top-level HWND
+[BLoader DevTools] GAME_HWND_FOUND hwnd=...
+[BLoader DevTools] CHILD_WINDOW_CREATED hwnd=...
+[BLoader DevTools] D3D11_DEVICE_READY; initializing egui frame
+[BLoader DevTools] UI_READY: first D3D11 Present succeeded; press F8 to show/hide
+```
+
+如果只有 `native-load`、`preload-native` 等消息，而没有 `Loading BL Mod`，说明 Mod 清单类型仍然不正确。若有 `WAITING_FOR_GAME_HWND`，说明 UI 线程没有识别到可用的游戏窗口；若有 `UI_THREAD_FAILED` 或 `D3D11_PRESENT_FAILED`，请提供对应错误号/错误信息。
+
+## 当前实现范围
+
+- BL Mod v1 ABI 的 `bl_mod_main_v1` 和 `on_load/on_unload`；
+- 初始化后创建独立 UI 线程，等待游戏 HWND，再创建 Win32 游戏子窗口；
+- egui 0.35 + egui-directx11，独立 D3D11 Device/Swapchain，窗口内可使用 F8 显隐；
+- AOB/十六进制离线测试、通配符匹配、复制特征；
+- 包含 Memory、Disassembly、Version Migration、Hooks 等页面，但**目前尚未实现对游戏的内存扫描、断点和真实 Hook 检测**；
+- 未安装额外 EXE；不 Hook Minecraft 原有 Present；无需独立服务进程。
 
 ### 已知限制
 
-此版使用同进程子窗口而非 RenderDragon 画面内纹理合成。在窗口化/无边框模式下试用；独占全屏、Raw Input、游戏鼠标锁定、跨线程子窗口焦点、中文 IME（当前仅基础 WM_CHAR）、鼠标 Raw Input 并行路径和多显示器 DPI 需要 Windows 实机验证。游戏进程整体被调试器暂停时，同进程 UI 一样会暂停。子窗口有自己的消息线程，但不能突破进程级暂停。
+此版不是 RenderDragon Swapchain 内的叠加纹理，而是同一进程下的 Win32 子窗口。窗口化/无边框模式优先测试。需要实测 D3D Swapchain 与游戏窗口遮挡次序、Raw Input、鼠标锁定、跨线程子窗口焦点、中文 IME、DPI、游戏退出与卸载。进程整体被暂停时，同进程 UI 也会暂停。
 
 ## 构建
 
-Windows 11 / Visual Studio C++ 构建工具（MSVC x64）+ Rust stable：
+在 Windows MSVC x64 Rust 环境：
 
-~~~powershell
-rustup target add x86_64-pc-windows-msvc
+```powershell
 cargo test --target x86_64-pc-windows-msvc
 cargo build --release --target x86_64-pc-windows-msvc
-~~~
+```
 
-产物为 target/x86_64-pc-windows-msvc/release/bloader_devtools.dll。将 DLL 作为 BLoader 的 BL Mod 部署，入口导出为 bl_mod_main_v1。Cargo 的 package.metadata.bl 声明用于配套打包工具读取。
+输出：`target/x86_64-pc-windows-msvc/release/bloader_devtools.dll`。必须与 `package/manifest.json` 同目录安装为 BL Mod。
 
-项目当前不包含 EXE、后台外部服务或独立进程。无 GUI 时不需要操作游戏 GPU 渲染链路。
+GitHub Actions 构建会同时校验 manifest，并提供已按 `mods/bloader.devtools/` 打包的可安装产物。构建通过不代表已经完成 Minecraft Windows 实机的窗口显示和卸载测试。
 
-**构建验证状态：** GitHub Actions Windows MSVC 构建已通过：2 项单元测试通过，Release `bloader_devtools.dll` 构建成功且产物已上传至 [Windows MSVC DLL #39459235451](https://github.com/Chlna6666/BLoader-DevTools/actions/runs/39459235451)。本次仅验证编译与离线测试，**尚未完成 Minecraft Windows 实机运行、F8 输入、显示与安全卸载验证**，不能将其视为已验证游戏内可用的发布版本。
+## 后续功能
 
-## 下一步
-
-对接 BLoader 的稳定 Hook 服务；以可取消后台任务实现只读内存扫描；实现指令分析与经验证的特征档案；跨版本迁移只发布有明确构建指纹的适配数据。开发模式首先限定为用户授权的离线/单人测试环境。
+先完成安装/显示/启动日志等可靠性测试，再添加只读扫描、寄存器快照、断点采样与跨版本自动特征迁移。调试实验应首先限定在授权的离线单人环境。

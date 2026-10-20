@@ -5,7 +5,7 @@
 use std::{
     cell::RefCell, ffi::c_void, iter, mem, ptr,
     sync::{Arc, Mutex, atomic::{AtomicBool, AtomicIsize, Ordering}},
-    thread::{self, JoinHandle}, time::Duration,
+    thread::{self, JoinHandle}, time::{Duration, Instant},
 };
 
 use egui::{Context, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, TouchPhase, Vec2};
@@ -31,7 +31,7 @@ use windows_sys::Win32::{
     },
 };
 
-use crate::ui::Workbench;
+use crate::{ui::Workbench, info, warn, error};
 use windows_sys::Win32::Graphics::Gdi::ValidateRect;
 
 fn missing_resource() -> windows::core::Error {
@@ -277,7 +277,9 @@ pub fn start() -> Result<(), ()> {
     let handle = thread::Builder::new().name("bloader-devtools-ui".into())
         .spawn(move || {
             if let Err(err) = run(thread_running, thread_hwnd) {
-                eprintln!("[DevTools] UI thread: {err}");
+                error(format!("[BLoader DevTools] UI_THREAD_FAILED: {err}"));
+            } else {
+                info("[BLoader DevTools] UI thread finished");
             }
         }).map_err(|_| ())?;
     *worker = Some(Worker { running, hwnd, thread: handle });
@@ -373,9 +375,18 @@ impl Graphics {
 }
 
 fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), String> {
+    info("[BLoader DevTools] UI_THREAD_STARTED; searching for Minecraft top-level HWND");
+    let mut last_report = Instant::now();
     let parent = loop {
         if !running.load(Ordering::Acquire) { return Ok(()); }
-        if let Some(hwnd) = find_game_window() { break hwnd; }
+        if let Some(hwnd) = find_game_window() {
+            info(format!("[BLoader DevTools] GAME_HWND_FOUND hwnd=0x{hwnd:X}"));
+            break hwnd;
+        }
+        if last_report.elapsed() >= Duration::from_secs(5) {
+            warn("[BLoader DevTools] WAITING_FOR_GAME_HWND; window may not yet be ready");
+            last_report = Instant::now();
+        }
         thread::sleep(Duration::from_millis(200));
     };
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
@@ -387,21 +398,30 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         ..unsafe { mem::zeroed() }
     };
     if unsafe { RegisterClassW(&class) } == 0 {
-        return Err("RegisterClassW failed".into());
+        return Err(format!("RegisterClassW failed: win32_error={}", unsafe { GetLastError() }));
     }
+    info("[BLoader DevTools] Win32 class registered");
+    let mut parent_rect: RECT = unsafe { mem::zeroed() };
+    let (panel_width, panel_height) = if unsafe { GetClientRect(parent as HWND, &mut parent_rect) } != 0 {
+        let width = (parent_rect.right - parent_rect.left).max(1);
+        let height = (parent_rect.bottom - parent_rect.top).max(1);
+        ((width - 32).max(1).min(950), (height - 40).max(1).min(620))
+    } else { (950, 620) };
+    info(format!("[BLoader DevTools] WINDOW_CREATING parent=0x{parent:X} size={panel_width}x{panel_height}"));
     let hwnd = unsafe {
         CreateWindowExW(
             0, WINDOW_CLASS.as_ptr(), WINDOW_TITLE.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 32, 36, 950, 620,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 24, 28, panel_width, panel_height,
             parent as HWND, ptr::null_mut(), instance, ptr::null(),
         )
     };
     if hwnd.is_null() {
         unsafe { UnregisterClassW(WINDOW_CLASS.as_ptr(), instance); }
-        return Err("CreateWindowExW failed".into());
+        return Err(format!("CreateWindowExW failed: win32_error={}", unsafe { GetLastError() }));
     }
     window_slot.store(hwnd as isize, Ordering::Release);
-    let mut gfx = match Graphics::new(hwnd as isize, 950, 620) {
+    info(format!("[BLoader DevTools] CHILD_WINDOW_CREATED hwnd=0x{:X}", hwnd as usize));
+    let mut gfx = match Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32) {
         Ok(gfx) => gfx,
         Err(err) => {
             unsafe { DestroyWindow(hwnd); UnregisterClassW(WINDOW_CLASS.as_ptr(), instance); }
@@ -409,7 +429,9 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
             return Err(format!("D3D11 initialization failed: {err}"));
         }
     };
+    info("[BLoader DevTools] D3D11_DEVICE_READY; initializing egui frame");
     let ctx = Context::default();
+    let mut first_frame_logged = false;
     let mut workbench = Workbench::default();
     let mut was_f8_down = false;
     let mut keep_running = true;
@@ -462,8 +484,16 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                                 clipboard_write(hwnd as isize, &value);
                             }
                         }
-                        if let Err(err) = gfx.render(&ctx, draw) {
-                            eprintln!("[DevTools] D3D11 rendering failed: {err}");
+                        match gfx.render(&ctx, draw) {
+                            Ok(()) if !first_frame_logged => {
+                                first_frame_logged = true;
+                                info("[BLoader DevTools] UI_READY: first D3D11 Present succeeded; press F8 to show/hide");
+                            }
+                            Err(err) => {
+                                error(format!("[BLoader DevTools] D3D11_PRESENT_FAILED: {err}"));
+                                keep_running = false;
+                            }
+                            _ => {}
                         }
                         if workbench.hide_requested {
                             workbench.hide_requested = false;
@@ -480,6 +510,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
             );
         }
     }
+    info("[BLoader DevTools] UI_SHUTDOWN: releasing D3D11 resources");
     // Drop D3D resources before destroying the child HWND and unregistering its class.
     drop(gfx);
     window_slot.store(0, Ordering::Release);

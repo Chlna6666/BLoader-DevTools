@@ -80,7 +80,7 @@ impl Workbench {
         });
         ui.separator();
         ui.horizontal(|ui| {
-            ui.small("BLoader DevTools v0.1.0");
+            ui.small(format!("BLoader DevTools v{}", env!("CARGO_PKG_VERSION")));
             ui.separator();
             ui.small("Offline AOB validation available · F8 toggle");
         });
@@ -88,6 +88,13 @@ impl Workbench {
     fn home(&mut self, ui: &mut egui::Ui) {
         ui.heading("Native Mod Development");
         ui.label("Tools for inspecting, validating and migrating Bedrock native mod interfaces.");
+        ui.label(format!("Version {} | Author: Chlna6666 | License: GPL-3.0-only", env!("CARGO_PKG_VERSION")));
+        ui.horizontal(|ui| {
+            ui.label("Source: https://github.com/Chlna6666/BLoader-DevTools");
+            if ui.button("Copy repository URL").clicked() {
+                ui.ctx().copy_text("https://github.com/Chlna6666/BLoader-DevTools".into());
+            }
+        });
         ui.add_space(16.0);
         ui.group(|ui| {
             ui.heading("Available now");
@@ -105,7 +112,7 @@ impl Workbench {
     fn unavailable(ui: &mut egui::Ui, title: &str, desc: &str) {
         ui.heading(title);
         ui.add_space(8.0);
-        ui.label(RichText::new("Not implemented in v0.1.0").color(Color32::YELLOW));
+        ui.label(RichText::new("Not implemented in v0.1.1").color(Color32::YELLOW));
         ui.label(desc);
         ui.add_space(14.0);
         ui.group(|ui| {
@@ -159,6 +166,10 @@ impl Workbench {
     }
     fn settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("Runtime settings");
+        ui.label(format!("BLoader DevTools v{}", env!("CARGO_PKG_VERSION")));
+        ui.label("Author: Chlna6666");
+        ui.label("Open-source license: GPL-3.0-only");
+        ui.label("Repository: https://github.com/Chlna6666/BLoader-DevTools");
         ui.label("Window: owned Win32 child of Minecraft's top-level HWND.");
         ui.label("Renderer: dedicated Direct3D 11 device and swap chain.");
         ui.label("Frame scheduling: input-driven; no 240 Hz idle redraw loop.");
