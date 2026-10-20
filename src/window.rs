@@ -389,7 +389,7 @@ impl Graphics {
             return Err("UI backbuffer 超出截图尺寸上限".into());
         }
         desc.Usage = D3D11_USAGE_STAGING;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
         desc.BindFlags = 0;
         desc.MiscFlags = 0;
         let mut staging = None;
