@@ -178,7 +178,7 @@ impl Workbench{
             ui.label(self.tab.name());
             ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
                 if ui.button("设置").clicked(){self.tab=Tab::Settings;}
-                if self.engine.busy {ui.spinner();ui.label("后台任务中");}
+                if self.engine.busy {ui.spinner();ui.label("后台任务中");if ui.button("取消任务").clicked(){self.engine.cancel();}}
                 else {ui.label(RichText::new("BL Mod  ·  就绪").color(GREEN));}
             });
         });

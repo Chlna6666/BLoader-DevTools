@@ -2,7 +2,7 @@
 //! No BLoader API is used here. Every scan is worker-thread-only.
 use std::{
     ffi::c_void, mem,
-    sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
+    sync::{mpsc::{sync_channel, Receiver, SyncSender, TrySendError}, Arc, atomic::{AtomicBool,Ordering}},
     thread::{self, JoinHandle},
 };
 use windows_sys::Win32::System::{
@@ -156,19 +156,23 @@ pub struct Engine{
     tx:Option<SyncSender<Command>>,
     rx:Receiver<Report>,
     handle:Option<JoinHandle<()>>,
+    cancel:Arc<AtomicBool>,
 }
 impl Engine {
     pub fn start()->Self{
         let (tx,cmd)=sync_channel::<Command>(1);
         let (result,rx)=sync_channel::<Report>(1);
+        let cancel=Arc::new(AtomicBool::new(false));
+        let worker_cancel=cancel.clone();
         let handle=thread::Builder::new().name("bloader-devtools-scan".into()).spawn(move||{
-            let mut state=ScanState::default();
+            let mut state=ScanState::new(worker_cancel.clone());
             while let Ok(item)=cmd.recv() {
+                worker_cancel.store(false,Ordering::Release);
                 let report=state.execute(item);
                 if result.send(report).is_err(){break;}
             }
         }).ok();
-        Self{busy:false,tx:Some(tx),rx,handle}
+        Self{busy:false,tx:Some(tx),rx,handle,cancel}
     }
     pub fn submit(&mut self, cmd:Command)->Result<(),String>{
         if self.busy {return Err("后台任务尚未完成".into());}
@@ -178,19 +182,21 @@ impl Engine {
         })?;
         self.busy=true;Ok(())
     }
+    pub fn cancel(&self){self.cancel.store(true,Ordering::Release);}
     pub fn poll(&mut self)->Option<Report>{
         match self.rx.try_recv(){Ok(report)=>{self.busy=false;Some(report)},Err(_)=>None}
     }
 }
 impl Drop for Engine {
     fn drop(&mut self){
+        self.cancel.store(true,Ordering::Release);
         self.tx.take();
         if let Some(handle)=self.handle.take(){let _=handle.join();}
     }
 }
-struct ScanState { hits:Vec<Hit>,kind:ValueKind }
-impl Default for ScanState{
-    fn default()->Self{Self{hits:Vec::new(),kind:ValueKind::F32}}
+struct ScanState { hits:Vec<Hit>,kind:ValueKind,cancel:Arc<AtomicBool> }
+impl ScanState{
+    fn new(cancel:Arc<AtomicBool>)->Self{Self{hits:Vec::new(),kind:ValueKind::F32,cancel}}
 }
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
@@ -210,6 +216,7 @@ impl ScanState {
             Command::Script(commands) => {
                 let mut combined=Report::new("脚本执行结果",self.kind);
                 for (index,command) in commands.into_iter().enumerate() {
+                    if self.cancel.load(Ordering::Acquire){combined.lines.push("脚本已取消".into());break;}
                     let report=self.execute(command);
                     combined.lines.push(format!("--- #{:02} {} ---",index+1,report.title));
                     combined.lines.extend(report.lines);
@@ -259,9 +266,11 @@ impl ScanState {
                 let needle=match kind.encode(&text){Ok(b)=>b,Err(e)=>{r.lines.push(e);return r}};
                 let mut total=0usize;
                 'outer: for region in enumerate_regions(MAX_SCAN_BYTES) {
+                    if self.cancel.load(Ordering::Acquire){r.lines.push("用户取消扫描".into());break;}
                     let mut offset=0usize;
                     let mut overlap=Vec::new();
                     while offset<region.len {
+                        if self.cancel.load(Ordering::Acquire){r.lines.push("用户取消扫描".into());break 'outer;}
                         let len=(region.len-offset).min(BLOCK);
                         let at=region.base+offset;
                         if let Ok(buffer)=read(at,len) {
@@ -289,7 +298,9 @@ impl ScanState {
                     match self.kind.encode(&text){Ok(v)=>Some(v),Err(e)=>{r.lines.push(e);return r}}
                 }else{None};
                 let kind=self.kind;
+                let cancel=self.cancel.clone();
                 self.hits.retain_mut(|hit|{
+                    if cancel.load(Ordering::Acquire){return false;}
                     let Ok(now)=read(hit.address,kind.size()) else{return false};
                     let keep=match filter {
                         Filter::Exact=>target.as_ref().is_some_and(|bytes|*bytes==now),
@@ -310,9 +321,11 @@ impl ScanState {
                 };
                 let mut total=0usize;
                 'outer:for region in enumerate_regions(MAX_SCAN_BYTES) {
+                    if self.cancel.load(Ordering::Acquire){r.lines.push("用户取消扫描".into());break;}
                     let mut offset=0usize;
                     let mut overlap=Vec::new();
                     while offset<region.len{
+                        if self.cancel.load(Ordering::Acquire){r.lines.push("用户取消扫描".into());break 'outer;}
                         let n=(region.len-offset).min(BLOCK);
                         if let Ok(bytes)=read(region.base+offset,n){
                             let mut joined=overlap.clone();
