@@ -13,13 +13,15 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use windows_sys::Win32::{
-    Foundation::HWND,
+    Foundation::{HWND,POINT},
     Graphics::Gdi::{
         BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
         DIB_RGB_COLORS, DeleteDC, DeleteObject, SelectObject,
     },
+    UI::Input::KeyboardAndMouse::{INPUT,INPUT_MOUSE,MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_LEFTUP,SendInput},
     UI::WindowsAndMessaging::{
-        GetClientRect, IsWindow, GetWindowThreadProcessId, GetClassNameW, GetWindowTextW, PostMessageW, WM_LBUTTONDOWN,
+        GetClientRect, IsWindow, GetWindowThreadProcessId, GetClassNameW, GetWindowTextW,
+        GetForegroundWindow, SetForegroundWindow, ClientToScreen, SetCursorPos, PostMessageW, WM_LBUTTONDOWN,
         WM_LBUTTONUP, WM_MOUSEMOVE,
     },
 };
@@ -219,10 +221,11 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
             },
             {
                 "name":"click_window",
-                "description":"向明确选定的窗口客户区发送一次 Win32 左键消息。仅用于获授权的离线游戏测试；Raw Input 游戏可能不会响应。坐标为客户端像素。",
+                "description":"在目标窗口客户区点击：game 默认使用 SendInput 真实输入（需游戏处于交互桌面），devtools 默认 Win32 消息。mode=message 可测试后台消息，mode=input 可测试游戏原生输入。仅用于有授权的离线游戏测试。",
                 "inputSchema":{"type":"object","properties":{
                     "target":{"type":"string","enum":["devtools","game"]},
-                    "x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0}
+                    "x":{"type":"integer","minimum":0},"y":{"type":"integer","minimum":0},
+                    "mode":{"type":"string","enum":["input","message"]}
                 },"required":["target","x","y"]}
             }
         ]}),
@@ -259,6 +262,40 @@ fn rect(hwnd: HWND) -> Result<(u32,u32),String> {
         return Err("窗口尺寸为空或超过 1920x1080 截图上限".into());
     }
     Ok((w,h))
+}
+
+
+/// SendInput acts on the foreground desktop, not a background HWND.
+/// The foreground check avoids clicking some unrelated active application.
+fn click_with_input(hwnd:HWND,x:i32,y:i32)->Result<(),String>{
+    let mut pos=POINT{x,y};
+    if unsafe {ClientToScreen(hwnd,&mut pos)}==0 {
+        return Err("ClientToScreen 失败；无法将游戏客户区坐标映射到桌面".into());
+    }
+    if unsafe{GetForegroundWindow()}!=hwnd {
+        unsafe {SetForegroundWindow(hwnd);}
+        std::thread::sleep(Duration::from_millis(70));
+        if unsafe{GetForegroundWindow()}!=hwnd {
+            return Err("无法激活 Minecraft 窗口；请先将游戏切换到前台再执行 input 点击".into());
+        }
+    }
+    if unsafe{SetCursorPos(pos.x,pos.y)}==0{
+        return Err("SetCursorPos 失败：远程桌面可能不允许光标注入".into());
+    }
+    let mut down:INPUT=unsafe {mem::zeroed()};
+    down.r#type=INPUT_MOUSE;
+    unsafe{down.Anonymous.mi.dwFlags=MOUSEEVENTF_LEFTDOWN;}
+    if unsafe{SendInput(1,&down,mem::size_of::<INPUT>() as i32)}!=1{
+        return Err("SendInput 按下失败；可能受到桌面会话权限或 UIPI 限制".into());
+    }
+    std::thread::sleep(Duration::from_millis(45));
+    let mut up:INPUT=unsafe {mem::zeroed()};
+    up.r#type=INPUT_MOUSE;
+    unsafe{up.Anonymous.mi.dwFlags=MOUSEEVENTF_LEFTUP;}
+    if unsafe{SendInput(1,&up,mem::size_of::<INPUT>() as i32)}!=1{
+        return Err("SendInput 释放失败；请检查是否有鼠标按键状态滞留".into());
+    }
+    Ok(())
 }
 
 fn call_tool(request:&Value) -> Value {
@@ -301,16 +338,22 @@ fn call_tool(request:&Value) -> Value {
                 let x=args["x"].as_u64().ok_or("缺少整数 x")?;
                 let y=args["y"].as_u64().ok_or("缺少整数 y")?;
                 if x>=width as u64 || y>=height as u64 { return Err("坐标超出窗口客户区".into()); }
-                let packed=(((y as usize) << 16) | (x as usize)) as isize;
-                unsafe {
-                    if PostMessageW(hwnd,WM_MOUSEMOVE,0,packed)==0 ||
-                       PostMessageW(hwnd,WM_LBUTTONDOWN,0x0001usize,packed)==0 ||
-                       PostMessageW(hwnd,WM_LBUTTONUP,0,packed)==0 {
-                        return Err("PostMessageW 发送失败".into());
+                let mode=args["mode"].as_str().unwrap_or(if target=="game"{"input"}else{"message"});
+                if mode=="input" {
+                    click_with_input(hwnd,x as i32,y as i32)?;
+                } else if mode=="message" {
+                    let packed=(((y as usize) << 16) | (x as usize)) as isize;
+                    unsafe {
+                        if PostMessageW(hwnd,WM_MOUSEMOVE,0,packed)==0 ||
+                           PostMessageW(hwnd,WM_LBUTTONDOWN,0x0001usize,packed)==0 ||
+                           PostMessageW(hwnd,WM_LBUTTONUP,0,packed)==0 {
+                            return Err("PostMessageW 发送失败".into());
+                        }
                     }
-                }
+                } else {return Err("mode 只能为 input 或 message".into());}
                 Ok(json!({"content":[{"type":"text","text":format!(
-                    "已提交左键事件 target={target} x={x} y={y}；消息被投递不等于游戏已执行操作"
+                    "已提交左键点击：target={target}, mode={mode}, hwnd=0x{:X}, x={x}, y={y}；请截图验证目标是否真的响应",
+                    hwnd as usize
                 )}]}))
             },
             _ => Err("未知工具".into()),
