@@ -19,7 +19,7 @@ use windows_sys::Win32::{
         DIB_RGB_COLORS, DeleteDC, DeleteObject, SelectObject,
     },
     UI::WindowsAndMessaging::{
-        GetClientRect, IsWindow, PostMessageW, WM_LBUTTONDOWN,
+        GetClientRect, IsWindow, GetWindowThreadProcessId, GetClassNameW, GetWindowTextW, PostMessageW, WM_LBUTTONDOWN,
         WM_LBUTTONUP, WM_MOUSEMOVE,
     },
 };
@@ -243,7 +243,7 @@ fn target_hwnd(target: &str) -> Result<HWND, String> {
         _ => return Err("未知目标窗口".into()),
     };
     if hwnd == 0 || unsafe { IsWindow(hwnd as HWND) } == 0 {
-        return Err("未找到可访问的目标 HWND；UWP 外部宿主窗口可能不属于 Minecraft 进程".into());
+        return Err(format!("未找到 {target} 的有效窗口。DevTools 已重新枚举 Bedrock/Minecraft HWND；请确认游戏处于可见状态"));
     }
     Ok(hwnd as HWND)
 }
@@ -270,10 +270,21 @@ fn call_tool(request:&Value) -> Value {
         let hwnd = target_hwnd(target)?;
         let (width,height)=rect(hwnd)?;
         match name {
-            "window_info" => Ok(json!({"content":[{"type":"text","text":format!(
-                "target={target}; hwnd=0x{:X}; client={}x{}; process=game; mcp=opt-in",
-                hwnd as usize,width,height
-            )}]})),
+            "window_info" => {
+                let mut pid=0u32;
+                unsafe { GetWindowThreadProcessId(hwnd,&mut pid); }
+                let mut cls=[0u16;128];
+                let mut title=[0u16;256];
+                let cls_len=unsafe { GetClassNameW(hwnd,cls.as_mut_ptr(),cls.len() as i32) }.max(0) as usize;
+                let title_len=unsafe { GetWindowTextW(hwnd,title.as_mut_ptr(),title.len() as i32) }.max(0) as usize;
+                Ok(json!({"content":[{"type":"text","text":format!(
+                    "target={target}; hwnd=0x{:X}; class={}; title={}; pid={}; client={}x{}; mcp=opt-in",
+                    hwnd as usize,
+                    String::from_utf16_lossy(&cls[..cls_len]),
+                    String::from_utf16_lossy(&title[..title_len]),
+                    pid,width,height
+                )}]}))
+            },
             "capture_window" => {
                 let image = if target == "devtools" {
                     capture_devtools_gpu()?

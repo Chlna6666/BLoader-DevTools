@@ -56,7 +56,7 @@ static WORKER: Mutex<Option<Worker>> = Mutex::new(None);
 static UI_HWND: AtomicIsize = AtomicIsize::new(0);
 static GAME_HWND: AtomicIsize = AtomicIsize::new(0);
 pub(crate) fn ui_hwnd() -> isize { UI_HWND.load(Ordering::Acquire) }
-pub(crate) fn game_hwnd() -> isize { GAME_HWND.load(Ordering::Acquire) }
+pub(crate) fn game_hwnd() -> isize { resolve_game_hwnd() }
 
 #[derive(Default)]
 struct InputQueue {
@@ -243,32 +243,75 @@ fn clipboard_read() -> Option<String> {
 
 #[derive(Default)]
 struct WindowSearch {
-    pid: u32,
+    own_pid: u32,
     hwnd: isize,
-    largest: i64,
+    selected_pid: u32,
+    score: u32,
+    area: i64,
 }
-
+fn win_text(hwnd: HWND, class: bool) -> String {
+    let mut text = [0u16; 260];
+    let count = if class {
+        unsafe { GetClassNameW(hwnd, text.as_mut_ptr(), text.len() as i32) }
+    } else {
+        unsafe { GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32) }
+    };
+    String::from_utf16_lossy(&text[..count.max(0) as usize])
+}
 unsafe extern "system" fn enum_window(hwnd: HWND, user: LPARAM) -> i32 {
     let state = unsafe { &mut *(user as *mut WindowSearch) };
     if unsafe { IsWindowVisible(hwnd) } == 0 { return 1; }
+    let cls = win_text(hwnd, true);
+    let title = win_text(hwnd, false);
+    let lower_title = title.to_ascii_lowercase();
+    // Never resolve our own UI or another arbitrary top-level window as "game".
+    // Bedrock HWNDs can belong to a different PID in UWP/window-host scenarios.
+    let is_bedrock = cls.eq_ignore_ascii_case("Bedrock");
+    let is_uwp_host = cls.eq_ignore_ascii_case("ApplicationFrameWindow");
+    if !lower_title.contains("minecraft") || !(is_bedrock || is_uwp_host) {
+        return 1;
+    }
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid); }
-    if pid != state.pid { return 1; }
     let mut rect: RECT = unsafe { mem::zeroed() };
     if unsafe { GetClientRect(hwnd, &mut rect) } == 0 { return 1; }
     let w = (rect.right - rect.left) as i64;
     let h = (rect.bottom - rect.top) as i64;
+    if w <= 0 || h <= 0 { return 1; }
     let area = w.saturating_mul(h);
-    if w >= 640 && h >= 400 && area > state.largest {
+    let score = (if is_bedrock { 100 } else { 50 }) +
+        (if pid == state.own_pid { 20 } else { 0 });
+    if score > state.score || (score == state.score && area > state.area) {
         state.hwnd = hwnd as isize;
-        state.largest = area;
+        state.selected_pid = pid;
+        state.score = score;
+        state.area = area;
     }
     1
 }
-fn find_game_window() -> Option<isize> {
-    let mut info = WindowSearch { pid: unsafe { GetCurrentProcessId() }, ..Default::default() };
+fn find_game_window() -> Option<(isize, u32)> {
+    let mut info = WindowSearch {
+        own_pid: unsafe { GetCurrentProcessId() },
+        ..WindowSearch::default()
+    };
     unsafe { EnumWindows(Some(enum_window), &mut info as *mut WindowSearch as isize); }
-    (info.hwnd != 0).then_some(info.hwnd)
+    (info.hwnd != 0).then_some((info.hwnd, info.selected_pid))
+}
+
+/// MCP clients request this on-demand. Win32 HWND lifetime is independent
+/// from the DevTools DLL, so a one-time startup cache is never authoritative.
+pub(crate) fn resolve_game_hwnd() -> isize {
+    let result = find_game_window();
+    let hwnd = result.map_or(0, |item| item.0);
+    let previous = GAME_HWND.swap(hwnd, Ordering::AcqRel);
+    if hwnd != previous {
+        if let Some((handle,pid)) = result {
+            info(format!("[BLoader DevTools] GAME_HWND_RESOLVED hwnd=0x{handle:X} pid={pid} class=Bedrock/ApplicationFrameWindow"));
+        } else if previous != 0 {
+            warn("[BLoader DevTools] GAME_HWND_INVALIDATED; waiting for game window to reappear");
+        }
+    }
+    hwnd
 }
 
 pub fn start() -> Result<(), ()> {
@@ -438,7 +481,7 @@ impl Graphics {
 
 fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), String> {
     info("[BLoader DevTools] UI_THREAD_STARTED; searching for Minecraft top-level HWND");
-    GAME_HWND.store(find_game_window().unwrap_or(0), Ordering::Release);
+    let _ = resolve_game_hwnd();
     let remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 };
     if remote_session {
         warn("[BLoader DevTools] REMOTE_SESSION_DETECTED; using visible same-process top-level window");
@@ -450,9 +493,14 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     let parent = if remote_session { 0 } else {
         loop {
             if !running.load(Ordering::Acquire) { return Ok(()); }
-            if let Some(hwnd) = find_game_window() {
-                info(format!("[BLoader DevTools] GAME_HWND_FOUND hwnd=0x{hwnd:X}"));
-                break hwnd;
+            if let Some((hwnd,pid)) = find_game_window() {
+                // Only parent the UI to an HWND in the *same* process.
+                // Foreign-process UWP windows are still valid MCP targets.
+                if pid == unsafe { GetCurrentProcessId() } {
+                    info(format!("[BLoader DevTools] GAME_HWND_FOUND hwnd=0x{hwnd:X} pid={pid}"));
+                    break hwnd;
+                }
+                break 0;
             }
             if search_started.elapsed() >= Duration::from_secs(3) {
                 warn("[BLoader DevTools] GAME_HWND_NOT_FOUND; starting visible in-process top-level fallback (UWP/window host may have a different PID)");
