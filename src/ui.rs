@@ -45,7 +45,7 @@ impl Workbench {
             ui.heading(RichText::new("BLoader DevTools").strong());
             ui.separator();
             ui.label(RichText::new("IN-PROCESS / D3D11").color(Color32::LIGHT_GREEN));
-            if ui.button("Hide (F8)").clicked() { self.hide_requested = true; }
+            ui.label("Opened automatically · F8 optional");
         });
         ui.separator();
         ui.horizontal(|ui| {
@@ -82,7 +82,7 @@ impl Workbench {
         ui.horizontal(|ui| {
             ui.small(format!("BLoader DevTools v{}", env!("CARGO_PKG_VERSION")));
             ui.separator();
-            ui.small("Offline AOB validation available · F8 toggle");
+            ui.small("Auto-show at startup · F8 optional");
         });
     }
     fn home(&mut self, ui: &mut egui::Ui) {
@@ -173,7 +173,9 @@ impl Workbench {
         ui.label("Window: owned Win32 child of Minecraft's top-level HWND.");
         ui.label("Renderer: dedicated Direct3D 11 device and swap chain.");
         ui.label("Frame scheduling: input-driven; no 240 Hz idle redraw loop.");
-        ui.label("UI hotkey: F8 (edge-triggered, focused game only).");
+        ui.label("UI appears automatically; F8 is an optional show/hide hotkey.");
+        ui.label("Remote Desktop: RDP uses an in-process top-level window when available.");
+        ui.label("UWP/game HWND not found: fallback after 3s, never wait forever.");
         ui.label("Unload: request event-loop exit, then join the worker thread.");
         ui.label("Game Hook API: disabled until verified host integration.");
     }

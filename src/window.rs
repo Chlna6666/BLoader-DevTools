@@ -12,7 +12,7 @@ use egui::{Context, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, 
 use windows::Win32::{
     Foundation::{HMODULE, HWND as ComHwnd},
     Graphics::{
-        Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
+        Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0},
         Direct3D11::*,
         Dxgi::{Common::*, *},
     },
@@ -123,7 +123,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             return 0;
         }
         WM_DESTROY => {
-            unsafe { PostQuitMessage(0); }
+            // Destroy/recreate a HWND during fallback without quitting the UI thread.
             return 0;
         }
         WM_SETFOCUS => mark_dirty(Some(Event::WindowFocused(true))),
@@ -311,13 +311,26 @@ impl Graphics {
         let adapter: IDXGIAdapter = unsafe { factory.EnumAdapters(0) }?;
         let mut device = None;
         let mut context = None;
-        unsafe {
+        let device_result = unsafe {
             D3D11CreateDevice(
                 &adapter, D3D_DRIVER_TYPE_UNKNOWN, HMODULE(ptr::null_mut()),
                 D3D11_CREATE_DEVICE_FLAG(0), Some(&[D3D_FEATURE_LEVEL_11_0]),
                 D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)
             )
-        }?;
+        };
+        if let Err(err) = device_result {
+            warn(format!("[BLoader DevTools] D3D11 hardware adapter initialization failed: {err}; trying WARP software device"));
+            device = None;
+            context = None;
+            unsafe {
+                D3D11CreateDevice(
+                    None::<&IDXGIAdapter>, D3D_DRIVER_TYPE_WARP, HMODULE(ptr::null_mut()),
+                    D3D11_CREATE_DEVICE_FLAG(0), Some(&[D3D_FEATURE_LEVEL_11_0]),
+                    D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)
+                )
+            }?;
+            warn("[BLoader DevTools] D3D11_WARP_FALLBACK enabled (remote GPU/device may be unavailable)");
+        }
         let device = device.ok_or_else(missing_resource)?;
         let context = context.ok_or_else(missing_resource)?;
         let desc = DXGI_SWAP_CHAIN_DESC {
@@ -376,18 +389,27 @@ impl Graphics {
 
 fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), String> {
     info("[BLoader DevTools] UI_THREAD_STARTED; searching for Minecraft top-level HWND");
-    let mut last_report = Instant::now();
-    let parent = loop {
-        if !running.load(Ordering::Acquire) { return Ok(()); }
-        if let Some(hwnd) = find_game_window() {
-            info(format!("[BLoader DevTools] GAME_HWND_FOUND hwnd=0x{hwnd:X}"));
-            break hwnd;
+    let remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 };
+    if remote_session {
+        warn("[BLoader DevTools] REMOTE_SESSION_DETECTED; using visible same-process top-level window");
+    }
+    // A UWP/ApplicationFrameHost game surface may not belong to Minecraft's PID.
+    // Never wait forever: fall back to a normal top-level Win32 window created by
+    // this very DLL in the game process (NOT a separate UI executable).
+    let search_started = Instant::now();
+    let parent = if remote_session { 0 } else {
+        loop {
+            if !running.load(Ordering::Acquire) { return Ok(()); }
+            if let Some(hwnd) = find_game_window() {
+                info(format!("[BLoader DevTools] GAME_HWND_FOUND hwnd=0x{hwnd:X}"));
+                break hwnd;
+            }
+            if search_started.elapsed() >= Duration::from_secs(3) {
+                warn("[BLoader DevTools] GAME_HWND_NOT_FOUND; starting visible in-process top-level fallback (UWP/window host may have a different PID)");
+                break 0;
+            }
+            thread::sleep(Duration::from_millis(200));
         }
-        if last_report.elapsed() >= Duration::from_secs(5) {
-            warn("[BLoader DevTools] WAITING_FOR_GAME_HWND; window may not yet be ready");
-            last_report = Instant::now();
-        }
-        thread::sleep(Duration::from_millis(200));
     };
     let instance = unsafe { GetModuleHandleW(ptr::null()) };
     let class = WNDCLASSW {
@@ -402,26 +424,64 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     }
     info("[BLoader DevTools] Win32 class registered");
     let mut parent_rect: RECT = unsafe { mem::zeroed() };
-    let (panel_width, panel_height) = if unsafe { GetClientRect(parent as HWND, &mut parent_rect) } != 0 {
+    let (panel_width, panel_height) = if parent != 0 && unsafe { GetClientRect(parent as HWND, &mut parent_rect) } != 0 {
         let width = (parent_rect.right - parent_rect.left).max(1);
         let height = (parent_rect.bottom - parent_rect.top).max(1);
         ((width - 32).max(1).min(950), (height - 40).max(1).min(620))
     } else { (950, 620) };
-    info(format!("[BLoader DevTools] WINDOW_CREATING parent=0x{parent:X} size={panel_width}x{panel_height}"));
-    let hwnd = unsafe {
+    let mut is_child = parent != 0;
+    let style = if is_child { WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS }
+                else { WS_OVERLAPPEDWINDOW | WS_VISIBLE };
+    let (x, y) = if is_child { (24, 28) } else { (CW_USEDEFAULT, CW_USEDEFAULT) };
+    info(format!("[BLoader DevTools] WINDOW_CREATING mode={} parent=0x{parent:X} size={panel_width}x{panel_height}",
+        if is_child { "game-child" } else { "same-process-top-level" }));
+    let mut hwnd = unsafe {
         CreateWindowExW(
             0, WINDOW_CLASS.as_ptr(), WINDOW_TITLE.as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 24, 28, panel_width, panel_height,
+            style, x, y, panel_width, panel_height,
             parent as HWND, ptr::null_mut(), instance, ptr::null(),
         )
     };
+    if hwnd.is_null() && is_child {
+        warn(format!("[BLoader DevTools] CHILD_WINDOW_FAILED win32_error={}; retrying same-process top-level UI",
+            unsafe { GetLastError() }));
+        hwnd = unsafe {
+            CreateWindowExW(0, WINDOW_CLASS.as_ptr(), WINDOW_TITLE.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+                panel_width, panel_height, ptr::null_mut(), ptr::null_mut(), instance, ptr::null())
+        };
+        is_child = false;
+    }
     if hwnd.is_null() {
         unsafe { UnregisterClassW(WINDOW_CLASS.as_ptr(), instance); }
-        return Err(format!("CreateWindowExW failed: win32_error={}", unsafe { GetLastError() }));
+        return Err(format!("CreateWindowExW failed for all modes: win32_error={}", unsafe { GetLastError() }));
     }
     window_slot.store(hwnd as isize, Ordering::Release);
-    info(format!("[BLoader DevTools] CHILD_WINDOW_CREATED hwnd=0x{:X}", hwnd as usize));
-    let mut gfx = match Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32) {
+    info(format!("[BLoader DevTools] UI_WINDOW_CREATED mode={} hwnd=0x{:X}", if is_child { "child" } else { "top-level" }, hwnd as usize));
+    // Explicitly show + paint immediately, not when F8 is pressed.
+    unsafe { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+    info("[BLoader DevTools] UI_WINDOW_SHOWN_BY_DEFAULT; hotkey is optional");
+    let mut graphics_result = Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32);
+    if is_child && graphics_result.is_err() {
+        warn(format!("[BLoader DevTools] CHILD_D3D11_FAILED: {}; retrying same-process top-level UI",
+            graphics_result.as_ref().err().unwrap()));
+        window_slot.store(0, Ordering::Release);
+        unsafe { DestroyWindow(hwnd); }
+        hwnd = unsafe {
+            CreateWindowExW(0, WINDOW_CLASS.as_ptr(), WINDOW_TITLE.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
+                panel_width, panel_height, ptr::null_mut(), ptr::null_mut(), instance, ptr::null())
+        };
+        if hwnd.is_null() {
+            unsafe { UnregisterClassW(WINDOW_CLASS.as_ptr(), instance); }
+            return Err(format!("D3D11 child fallback window failed: win32_error={}", unsafe { GetLastError() }));
+        }
+        is_child = false;
+        window_slot.store(hwnd as isize, Ordering::Release);
+        unsafe { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+        graphics_result = Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32);
+    }
+    let mut gfx = match graphics_result {
         Ok(gfx) => gfx,
         Err(err) => {
             unsafe { DestroyWindow(hwnd); UnregisterClassW(WINDOW_CLASS.as_ptr(), instance); }
@@ -429,13 +489,16 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
             return Err(format!("D3D11 initialization failed: {err}"));
         }
     };
+    info(format!("[BLoader DevTools] UI_MODE_READY mode={}", if is_child { "game-child" } else { "same-process-top-level" }));
     info("[BLoader DevTools] D3D11_DEVICE_READY; initializing egui frame");
     let ctx = Context::default();
     let mut first_frame_logged = false;
     let mut workbench = Workbench::default();
     let mut was_f8_down = false;
     let mut keep_running = true;
-    while keep_running && running.load(Ordering::Acquire) && unsafe { IsWindow(parent as HWND) != 0 } {
+    while keep_running && running.load(Ordering::Acquire) &&
+        unsafe { IsWindow(hwnd) != 0 } &&
+        (!is_child || unsafe { IsWindow(parent as HWND) != 0 }) {
         let mut msg: MSG = unsafe { mem::zeroed() };
         while unsafe { PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
             if msg.message == WM_QUIT {
@@ -447,7 +510,9 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         if !keep_running { break; }
 
         let f8_down = (unsafe { GetAsyncKeyState(0x77) } as u16 & 0x8000) != 0;
-        if f8_down && !was_f8_down && unsafe { GetForegroundWindow() } == parent as HWND {
+        let foreground = unsafe { GetForegroundWindow() };
+        if f8_down && !was_f8_down &&
+            (foreground == hwnd || (parent != 0 && foreground == parent as HWND)) {
             let visible = INPUT.with(|cell| {
                 let mut input = cell.borrow_mut();
                 input.visible = !input.visible;
@@ -487,7 +552,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                         match gfx.render(&ctx, draw) {
                             Ok(()) if !first_frame_logged => {
                                 first_frame_logged = true;
-                                info("[BLoader DevTools] UI_READY: first D3D11 Present succeeded; press F8 to show/hide");
+                                info("[BLoader DevTools] UI_READY: first D3D11 Present succeeded; UI is visible by default (F8 optional)");
                             }
                             Err(err) => {
                                 error(format!("[BLoader DevTools] D3D11_PRESENT_FAILED: {err}"));

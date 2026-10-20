@@ -4,7 +4,7 @@
   "entry": "bloader_devtools.dll",
   "type": "BL",
   "api_version": 1,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Chlna6666",
   "description": "Open-source, in-process egui/D3D11 developer workspace for Minecraft Bedrock",
   "requires_symbol_pack": false,

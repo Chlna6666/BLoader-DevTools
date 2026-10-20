@@ -1,8 +1,8 @@
 # BLoader DevTools
 
-BLoader DevTools 是在 Minecraft Bedrock 进程内运行的开源 BL Mod，使用 Rust + egui + DirectX 11。没有独立 UI EXE；UI 由 DLL 自行创建，使用独立的 Win32 子窗口与消息/渲染线程。
+BLoader DevTools 是在 Minecraft Bedrock 进程内运行的开源 BL Mod，使用 Rust + egui + DirectX 11。没有独立 UI EXE；UI 由 DLL 自行创建，使用独立的 Win32 游戏子窗口（必要时同进程顶层窗口）与消息/渲染线程。
 
-- 版本：0.1.1
+- 版本：0.1.2
 - 作者：Chlna6666
 - 协议：GPL-3.0-only
 - 源码：https://github.com/Chlna6666/BLoader-DevTools
@@ -30,7 +30,7 @@ Minecraft 游戏版本目录/
 加载成功时应先看到 BLoader 的 `Loading BL Mod: BLoader DevTools`，随后看到 DevTools 自己的：
 
 ```text
-[BLoader DevTools] v0.1.1 | Windows x64
+[BLoader DevTools] v0.1.2 | Windows x64
 [BLoader DevTools] Author: Chlna6666
 [BLoader DevTools] License: GPL-3.0-only (open source)
 [BLoader DevTools] Source: https://github.com/Chlna6666/BLoader-DevTools
@@ -49,14 +49,17 @@ Minecraft 游戏版本目录/
 
 - BL Mod v1 ABI 的 `bl_mod_main_v1` 和 `on_load/on_unload`；
 - 初始化后创建独立 UI 线程，等待游戏 HWND，再创建 Win32 游戏子窗口；
-- egui 0.35 + egui-directx11，独立 D3D11 Device/Swapchain，窗口内可使用 F8 显隐；
+- egui 0.35 + egui-directx11，独立 D3D11 Device/Swapchain，**启动时自动显示，无需按 F8**；
+- 对 RDP 远程会话使用同进程顶层窗口；若游戏主窗口不属于当前 PID，3 秒内回退，不再无限等待；
+- 游戏子窗口创建失败或其 Swapchain 初始化失败时自动尝试同进程顶层窗口；
+- 硬件 D3D11 初始化失败时尝试 WARP 软件渲染，并记录显式诊断日志。
 - AOB/十六进制离线测试、通配符匹配、复制特征；
 - 包含 Memory、Disassembly、Version Migration、Hooks 等页面，但**目前尚未实现对游戏的内存扫描、断点和真实 Hook 检测**；
 - 未安装额外 EXE；不 Hook Minecraft 原有 Present；无需独立服务进程。
 
 ### 已知限制
 
-此版不是 RenderDragon Swapchain 内的叠加纹理，而是同一进程下的 Win32 子窗口。窗口化/无边框模式优先测试。需要实测 D3D Swapchain 与游戏窗口遮挡次序、Raw Input、鼠标锁定、跨线程子窗口焦点、中文 IME、DPI、游戏退出与卸载。进程整体被暂停时，同进程 UI 也会暂停。
+此版不是 RenderDragon Swapchain 内的叠加纹理，而是同一进程下的 Win32 子窗口。窗口化/无边框模式优先测试。远程桌面通常能显示顶层窗口，但**只捕获游戏 Swapchain 的直播/串流软件未必会捕获独立窗口或 Win32 子窗口**；这种情况需要进一步实现真正绘制进游戏渲染目标的 Overlay，不是 F8 问题。需要实测 D3D Swapchain 与游戏窗口遮挡次序、Raw Input、鼠标锁定、跨线程子窗口焦点、中文 IME、DPI、游戏退出与卸载。进程整体被暂停时，同进程 UI 也会暂停。
 
 ## 构建
 
@@ -74,3 +77,9 @@ GitHub Actions 构建会同时校验 manifest，并提供已按 `mods/bloader.de
 ## 后续功能
 
 先完成安装/显示/启动日志等可靠性测试，再添加只读扫描、寄存器快照、断点采样与跨版本自动特征迁移。调试实验应首先限定在授权的离线单人环境。
+
+## 启动自动显示与远程验证
+
+v0.1.2 在 BL Mod `on_load` 后启动 UI 线程，成功创建 Win32 窗口就立即 `ShowWindow` 和 `UpdateWindow`，无需任何热键。仍支持 F8 作为可选操作。RDP 会话在同一个 Minecraft 进程内创建顶层 DevTools 窗口；无法识别游戏 HWND 时等待最多 3 秒后回退。子窗口无法创建或 D3D11 初始化失败时也尝试顶层模式。
+
+正常日志重点：`UI_THREAD_STARTED` → `GAME_HWND_FOUND` 或 `GAME_HWND_NOT_FOUND` / `REMOTE_SESSION_DETECTED` → `UI_WINDOW_CREATED` → `UI_WINDOW_SHOWN_BY_DEFAULT` → `UI_MODE_READY` → `UI_READY`。出现 `UI_THREAD_FAILED` 时根据 Win32/HRESULT 错误排查。如果日志达到 `UI_READY` 但远程串流看不到，请确认远程工具捕获的是整个桌面还是仅游戏画面。
