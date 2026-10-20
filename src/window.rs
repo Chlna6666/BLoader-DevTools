@@ -289,7 +289,7 @@ pub fn stop() {
         worker.running.store(false, Ordering::Release);
         let hwnd = worker.hwnd.load(Ordering::Acquire);
         if hwnd != 0 {
-            unsafe { PostMessageW(hwnd, WM_NULL, 0, 0); }
+            unsafe { PostMessageW(hwnd as HWND, WM_NULL, 0, 0); }
         }
         let _ = worker.thread.join();
     }

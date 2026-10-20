@@ -39,8 +39,7 @@ impl Default for Workbench {
     }
 }
 impl Workbench {
-    pub fn ui(&mut self, ctx: &Context) {
-        pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn ui(&mut self, ui: &mut Ui) {
         ui.ctx().set_visuals(egui::Visuals::dark());
         ui.horizontal(|ui| {
             ui.heading(RichText::new("BLoader DevTools").strong());
@@ -86,7 +85,8 @@ impl Workbench {
             ui.small("Offline AOB validation available · F8 toggle");
         });
     }
-      ui.heading("Native Mod Development");
+    fn home(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Native Mod Development");
         ui.label("Tools for inspecting, validating and migrating Bedrock native mod interfaces.");
         ui.add_space(16.0);
         ui.group(|ui| {
