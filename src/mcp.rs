@@ -20,7 +20,7 @@ use windows_sys::Win32::{
     },
     UI::WindowsAndMessaging::{
         GetClientRect, IsWindow, PostMessageW, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MOUSEMOVE, MK_LBUTTON,
+        WM_LBUTTONUP, WM_MOUSEMOVE,
     },
 };
 use crate::{info, warn, window};
@@ -266,7 +266,7 @@ fn call_tool(request:&Value) -> Value {
                 let packed=(((y as usize) << 16) | (x as usize)) as isize;
                 unsafe {
                     if PostMessageW(hwnd,WM_MOUSEMOVE,0,packed)==0 ||
-                       PostMessageW(hwnd,WM_LBUTTONDOWN,MK_LBUTTON as usize,packed)==0 ||
+                       PostMessageW(hwnd,WM_LBUTTONDOWN,0x0001usize,packed)==0 ||
                        PostMessageW(hwnd,WM_LBUTTONUP,0,packed)==0 {
                         return Err("PostMessageW 发送失败".into());
                     }
