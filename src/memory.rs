@@ -493,7 +493,31 @@ mod tests{
         let hi=((1u64<<60)+1).to_le_bytes();
         assert!(ValueKind::U64.compare(&hi,&lo).is_gt());
     }
-    #[test]fn compare_unsigned_32_is_exact(){
+    #[test]fn assert_reads_owned_memory_and_rejects_wrong_value(){
+        let value=Box::new(90.0f32);
+        let address=(&*value as *const f32) as usize;
+        let mut engine=ScanState::new(Arc::new(AtomicBool::new(false)));
+        assert!(engine.execute(Command::Assert{
+            address,kind:ValueKind::F32,expected:"90".into()
+        }).ok);
+        let failed=engine.execute(Command::Assert{
+            address,kind:ValueKind::F32,expected:"91".into()
+        });
+        assert!(!failed.ok);
+        assert!(*value==90.0);
+    }
+    #[test]fn failed_assert_stops_script_before_write(){
+        let value=Box::new(90.0f32);
+        let address=(&*value as *const f32) as usize;
+        let mut engine=ScanState::new(Arc::new(AtomicBool::new(false)));
+        let report=engine.execute(Command::Script(vec![
+            Command::Assert{address,kind:ValueKind::F32,expected:"2".into()},
+            Command::Write{address,kind:ValueKind::F32,old:"90".into(),new:"65".into()},
+        ]));
+        assert!(!report.ok);
+        assert_eq!(*value,90.0);
+    }
+        #[test]fn compare_unsigned_32_is_exact(){
         let a=u32::MAX.to_le_bytes();
         let b=(u32::MAX-1).to_le_bytes();
         assert!(ValueKind::U32.compare(&a,&b).is_gt());

@@ -55,6 +55,17 @@ next changed
 
 write 需要显式勾选当前运行的写入权限，并指定预期旧值。如果扫描结果已变化，写入会拒绝；不会自动更改页面权限或修补可执行代码。工程脚本与特征数据库保存至 %LOCALAPPDATA%\BLoader-DevTools\ 。
 
+## 0.2.x 工作台与调试功能增强
+
+- 内存扫描区间支持输入起止十六进制地址，权限选择“可写数据 / 全部可读 / 可执行代码”，可配置 16–1024 MiB 扫描预算；这些是**扫描预算**，并不代表会无条件扫描整个 Minecraft 进程。
+- 扫描结果按每页 100 条展示；支持数值筛选、取消任务和避免 U64 大整数精度丢失；AOB 结果不再混成数值基线。
+- 地址检查器新增最多 64 个实时监视项，700ms 后台刷新；监视表保存在 `%LOCALAPPDATA%\\BLoader-DevTools\\watches.json`，支持重启恢复。
+- IDE 工作台增加显隐项目栏、检查器、控制台，窄窗口中检查器自动改为浮动窗口；按 Ctrl+1…8 可切换八个工具标签（前提是 DevTools 接收到按键）。
+- CE 风格**受限 DSL**支持 `assert 0x地址 f32 90`、`wait 200`、`write 0x地址 f32 90 65`，其中 wait 上限单次 2000ms，assert 失败停止后续写入。脚本提供单独的语法验证按钮。
+- MCP 新增 `devtools_state` 与 `devtools_navigate(tab="script")`：直接和 DevTools UI 线程交互，返回真实状态、切换工具页，避免依赖不可靠的后台点击。
+- 特征数据库写回改用 Windows 文件替换机制，避免第二次保存已有特征时文件重名失败。
+- 仍待实现完全可拖拽的 IntelliJ IDEA 停靠面板、CE AutoAssembler、硬件断点、指针扫描、真正 RenderDragon 帧捕获与跨版本 CFG/ABI 迁移；详见 [DEVTOOLS_TODO.md](DEVTOOLS_TODO.md)。
+
 ## MCP 与游戏窗口修复
 
 MCP 默认关闭，在 DevTools 设置页手动开启，只监听 127.0.0.1，使用随机 Bearer token。连接方式见设置页；云端 ChatGPT 不能直接访问本机回环地址。
