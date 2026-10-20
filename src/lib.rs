@@ -3,6 +3,10 @@
 //! The BL host ABI prefix and BL mod descriptor mirror BLoader/bl-sdk at v0.2.77.
 
 mod signature;
+mod memory;
+mod script;
+mod project;
+mod inspection;
 mod mcp;
 mod ui;
 mod window;

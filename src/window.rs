@@ -525,8 +525,8 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     let (panel_width, panel_height) = if parent != 0 && unsafe { GetClientRect(parent as HWND, &mut parent_rect) } != 0 {
         let width = (parent_rect.right - parent_rect.left).max(1);
         let height = (parent_rect.bottom - parent_rect.top).max(1);
-        ((width - 32).max(1).min(950), (height - 40).max(1).min(620))
-    } else { (950, 620) };
+        ((width - 32).max(1).min(1240), (height - 40).max(1).min(820))
+    } else { (1200, 800) };
     let mut is_child = parent != 0;
     let style = if is_child { WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS }
                 else { WS_OVERLAPPEDWINDOW | WS_VISIBLE };
@@ -640,6 +640,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
             }
         }
 
+        if workbench.needs_poll() { mark_dirty(None); }
         let (visible, dirty, events) = INPUT.with(|cell| {
             let mut state = cell.borrow_mut();
             let dirty = mem::take(&mut state.dirty);
