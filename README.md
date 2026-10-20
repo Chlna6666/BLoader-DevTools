@@ -1,6 +1,6 @@
 # BLoader DevTools
 
-版本：0.2.1 · 作者：Chlna6666 · GPL-3.0-only
+版本：0.2.2 · 作者：Chlna6666 · GPL-3.0-only
 
 项目：https://github.com/Chlna6666/BLoader-DevTools
 
@@ -66,6 +66,16 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 - 特征数据库写回改用 Windows 文件替换机制，避免第二次保存已有特征时文件重名失败。
 - 仍待实现完全可拖拽的 IntelliJ IDEA 停靠面板、CE AutoAssembler、硬件断点、指针扫描、真正 RenderDragon 帧捕获与跨版本 CFG/ABI 迁移；详见 [DEVTOOLS_TODO.md](DEVTOOLS_TODO.md)。
 
+
+## 0.2.2 本地玩家定位
+
+新增「本地玩家定位」页，MCP 也支持 `devtools_navigate(tab="localplayer")`。定位采用 `ClientInstance → getLocalPlayer() → LocalPlayer` 的版本化候选路径；与 BLoader Game SDK 无关。
+
+- 快速在游戏主 EXE 可执行区匹配历史参考 `getLocalPlayerIndex` AOB。仅唯一匹配时解析候选虚表索引，不直接执行虚函数。
+- 手动提供 ClientInstance 的运行时指针或持有指针的地址槽，验证虚表及入口；对于确知旧版成员偏移的版本可只读探测玩家指针。
+- 导出候选定位规则绑定当前游戏 EXE SHA-256 和访问方式；不保存 ASLR 绝对内存地址，始终标记 `candidate-only`，游戏更新后不得自动沿用旧构建结果。
+- 没有 ClientInstance 对象来源时，虚表索引本身不足以定位 LocalPlayer；需要额外的游戏生命周期事件获取 this 指针。当前没有自动调用未验证的方法，也没有承诺进入世界后自动识别。
+- 玩家进入/退出世界、重新连接、加载屏幕和版本变化应分别进行实机校验，不能将可读的 C++ vptr 认定为类型证明。
 
 ## 0.2.1 游戏窗口截图与可调整工作台
 

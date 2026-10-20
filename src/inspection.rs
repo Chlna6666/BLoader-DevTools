@@ -8,6 +8,24 @@ use windows_sys::Win32::{
         Threading::GetCurrentProcessId,
     }
 };
+/// Return the image range of the game process main executable. The first
+/// ToolHelp module entry is the process executable on Windows; do not guess
+/// an ASLR base or search unrelated shared DLLs for a game-only reference.
+pub fn main_image_range()->Result<(usize,usize),String>{
+    let snap=unsafe {CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,GetCurrentProcessId())};
+    if snap==INVALID_HANDLE_VALUE{return Err("主 EXE 模块枚举失败".into());}
+    let mut entry:MODULEENTRY32W=unsafe{mem::zeroed()};
+    entry.dwSize=mem::size_of::<MODULEENTRY32W>() as u32;
+    let ok=unsafe{Module32FirstW(snap,&mut entry)};
+    unsafe{CloseHandle(snap);}
+    if ok==0 || entry.modBaseAddr.is_null() || entry.modBaseSize==0{
+        return Err("无法确定 Minecraft EXE 映像范围".into());
+    }
+    let base=entry.modBaseAddr as usize;
+    let size=entry.modBaseSize as usize;
+    if base.checked_add(size).is_none(){return Err("游戏模块地址溢出".into());}
+    Ok((base,size))
+}
 pub fn modules()->Vec<String>{
     let snap=unsafe{CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,
         GetCurrentProcessId())};

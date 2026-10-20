@@ -22,6 +22,15 @@
 - [x] 游戏 HWND 在前台时尝试 GDI 桌面合成截图，实验性 PrintWindow 回退；放宽 window_info/click 的截图大小限制
 - [ ] 真实 RenderDragon 游戏帧捕获：WGC/后端特定 GPU 安全读回，不再依赖 PrintWindow/桌面截取；支持帧时间戳和分辨率代次
 
+## 本地玩家（LocalPlayer）统一定位工作区
+- [x] 专用 LocalPlayer 工作区、参考 AOB 游戏 EXE 可执行区查找、只读虚表索引解码
+- [x] 已知 ClientInstance 对象或指针槽的只读验证；手动成员偏移探测 / 虚表入口候选
+- [x] 游戏主 EXE SHA-256 绑定的候选规则保存（无运行时绝对指针），标注 candidate-only
+- [ ] 自动捕获 ClientInstance 的生命周期入口，并在正确游戏线程安全调用 getter
+- [ ] 进入/退出世界和重新连接的多版本对象代次与地址失效验证
+- [ ] 跨版本 CFG/ABI 的自动验证与可由普通 Mod 使用的生成 SDK
+- [ ] 历史 Flarial 参考模式不保证当前 Bedrock 版本存在；不能用其宣称已经识别玩家
+
 ## P1：原生调试能力
 - [ ] 指针链与指针扫描，引用关系、模块基址/RVA，读写观察与变化历史
 - [ ] 进程内线程列表、CONTEXT、硬件断点（DR0–DR3）、VEH 异常分发、无暂停捕获模式；全局暂停需保留外部可操作通道

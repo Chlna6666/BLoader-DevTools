@@ -96,6 +96,69 @@ pub fn save_script(source:&str)->Result<String,String>{
 pub fn load_script()->Result<String,String>{
     fs::read_to_string(root()?.join("workspace.bldscript")).map_err(|e|e.to_string())
 }
+
+/// Stores a build-scoped discovery *recipe*, never raw pointers. A heap address
+/// changes with ASLR/world lifecycle and must not become a reusable Mod ABI.
+pub fn save_local_player_recipe(
+    candidate:&crate::local_player::Candidate,
+)->Result<String,String>{
+    if !candidate.build_id.starts_with("exe-sha256:") {
+        return Err("当前游戏缺少可靠的 EXE 指纹，不能保存版本规则".into());
+    }
+    let (access,offset)=match candidate.access{
+        crate::local_player::PlayerAccess::MemberOffset(n)=>("member_offset",n),
+        crate::local_player::PlayerAccess::VtableIndex(n)=>("vtable_index",n),
+    };
+    let data=json!({
+        "schema":1,
+        "symbol":"LocalPlayer",
+        "game_executable_sha256":candidate.build_id,
+        "source_kind":match candidate.source_kind {
+            crate::local_player::SourceKind::DirectInstance=>"runtime-instance",
+            crate::local_player::SourceKind::PointerSlot=>"pointer-slot",
+        },
+        "access_kind":access,
+        "access_value":offset,
+        "reference_pattern":if access=="vtable_index"{
+            crate::local_player::INDEX_REFERENCE_AOB
+        }else{""},
+        "verification":"candidate-only",
+        "important":"No raw process pointer saved. Source acquisition and ABI verification remain necessary; do not call vtable methods from arbitrary threads."
+    });
+    let path=root()?.join("local_player_recipes.json");
+    let mut entries=match fs::read_to_string(&path){
+        Ok(v)=>serde_json::from_str::<Vec<Value>>(&v).map_err(|e|e.to_string())?,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Vec::new(),
+        Err(e)=>return Err(e.to_string()),
+    };
+    if let Some(existing)=entries.iter_mut().find(|v|
+        v["game_executable_sha256"].as_str()==Some(candidate.build_id.as_str()) &&
+        v["access_kind"]==access) {
+        *existing=data;
+    }else{entries.push(data);}
+    if entries.len()>128{return Err("候选版本记录超过 128 项，请先备份清理旧档案".into());}
+    let tmp=root()?.join("local_player_recipes.json.tmp");
+    fs::write(&tmp,serde_json::to_vec_pretty(&entries).map_err(|e|e.to_string())?)
+        .map_err(|e|e.to_string())?;
+    replace_file_windows(&tmp,&path)?;
+    Ok(path.display().to_string())
+}
+pub fn local_player_recipes()->Result<Vec<String>,String>{
+    let path=root()?.join("local_player_recipes.json");
+    let source=match fs::read_to_string(path){
+        Ok(s)=>s,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(Vec::new()),
+        Err(e)=>return Err(e.to_string()),
+    };
+    let entries:Vec<Value>=serde_json::from_str(&source).map_err(|e|e.to_string())?;
+    Ok(entries.iter().map(|v|format!("{} | {} #{} | {}",
+        v["game_executable_sha256"].as_str().unwrap_or("unknown"),
+        v["access_kind"].as_str().unwrap_or("unknown"),
+        v["access_value"].as_u64().unwrap_or(0),
+        v["verification"].as_str().unwrap_or("unverified"),
+    )).collect())
+}
+
 pub fn save_feature(name:&str,pattern:&str)->Result<String,String>{
     let rule=Pattern::parse(pattern).map_err(str::to_owned)?;
     if name.trim().len()>120||name.trim().is_empty(){return Err("请填写不超过 120 字的特征名称".into());}

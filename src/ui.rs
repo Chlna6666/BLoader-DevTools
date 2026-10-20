@@ -3,6 +3,7 @@
 //! never in BLoader and never on the game/render thread.
 use crate::{
     memory::{self,Command,Engine,Filter,Hit,ValueKind,ScanScope,ScanOptions},
+    local_player::{self,Candidate,PlayerAccess,SourceKind},
     signature::{Pattern,decode_hex},
 };
 use egui::{Align,Color32,FontFamily,FontId,Frame,Layout,RichText,ScrollArea,Stroke,TextEdit,Ui,Vec2};
@@ -20,12 +21,12 @@ const MUTED:Color32=Color32::from_rgb(155,168,190);
 const REPO:&str="https://github.com/Chlna6666/BLoader-DevTools";
 
 #[derive(Clone,Copy,PartialEq,Eq)]
-enum Tab{Memory,Hex,Disasm,Signature,Script,Migration,Hooks,Settings}
+enum Tab{Memory,LocalPlayer,Hex,Disasm,Signature,Script,Migration,Hooks,Settings}
 impl Tab {
-    const ALL:[Self;8]=[Self::Memory,Self::Hex,Self::Disasm,Self::Signature,
+    const ALL:[Self;9]=[Self::Memory,Self::LocalPlayer,Self::Hex,Self::Disasm,Self::Signature,
         Self::Script,Self::Migration,Self::Hooks,Self::Settings];
     fn name(self)->&'static str { match self{
-        Self::Memory=>"内存扫描",Self::Hex=>"十六进制",
+        Self::Memory=>"内存扫描",Self::LocalPlayer=>"本地玩家定位",Self::Hex=>"十六进制",
         Self::Disasm=>"反汇编",Self::Signature=>"AOB 特征",
         Self::Script=>"脚本实验室",Self::Migration=>"版本迁移",
         Self::Hooks=>"模块 / Hook",Self::Settings=>"设置",
@@ -159,6 +160,14 @@ pub struct Workbench {
     show_inspector:bool,
     show_console:bool,
     layout_dirty:bool,
+    player_source:String,
+    player_source_kind:SourceKind,
+    player_access_vtable:bool,
+    player_offset:String,
+    player_candidate:Option<Candidate>,
+    player_lines:Vec<String>,
+    player_index_hit:Option<usize>,
+    player_profiles:Vec<String>,
 }
 impl Default for Workbench{
     fn default()->Self{
@@ -187,6 +196,14 @@ impl Default for Workbench{
             show_explorer:layout.explorer_visible,
             show_inspector:layout.inspector_visible,
             show_console:layout.console_visible,layout_dirty:false,
+            player_source:"0x0".into(),
+            player_source_kind:SourceKind::DirectInstance,
+            player_access_vtable:true,
+            player_offset:"0".into(),
+            player_candidate:None,
+            player_lines:Vec::new(),
+            player_index_hit:None,
+            player_profiles:crate::project::local_player_recipes().unwrap_or_default(),
         }
     }
 }
@@ -194,6 +211,7 @@ impl Workbench{
     pub fn navigate(&mut self,name:&str)->Result<String,String>{
         self.tab=match name.trim().to_ascii_lowercase().as_str(){
             "memory"|"scan"|"内存扫描"=>Tab::Memory,
+            "localplayer"|"player"|"本地玩家"|"本地玩家定位"=>Tab::LocalPlayer,
             "hex"|"十六进制"=>Tab::Hex,
             "disasm"|"反汇编"=>Tab::Disasm,
             "signature"|"aob"|"特征"=>Tab::Signature,
@@ -271,6 +289,18 @@ impl Workbench{
                 for line in &report.lines {self.log(line.clone());}
             }
             match report.title.as_str(){
+                "本地玩家候选检查"=>{
+                    self.player_lines=report.lines.clone();
+                    self.player_candidate=report.player_candidate.clone();
+                },
+                "本地玩家虚表索引特征"=>{
+                    self.player_lines=report.lines.clone();
+                    self.player_index_hit=report.index_candidate;
+                    if let Some(index)=report.index_candidate{
+                        self.player_access_vtable=true;
+                        self.player_offset=index.to_string();
+                    }
+                },
                 "首次精确扫描"|"再次扫描"|"游戏内特征扫描"|"脚本执行结果"=>{
                     self.hits=report.hits;
                     self.selected_hit=None;
@@ -300,6 +330,7 @@ impl Workbench{
             (egui::Key::Num3,"disasm"),(egui::Key::Num4,"signature"),
             (egui::Key::Num5,"script"),(egui::Key::Num6,"migration"),
             (egui::Key::Num7,"hooks"),(egui::Key::Num8,"settings"),
+            (egui::Key::Num9,"localplayer"),
         ];
         for (key,tool) in shortcuts {
             if ui.input(|input|input.modifiers.ctrl && input.key_pressed(key)){
@@ -327,7 +358,7 @@ impl Workbench{
             ui.label(RichText::new("Minecraft Bedrock").color(self.muted()));
             ui.label(RichText::new(" / ").color(self.muted()));
             ui.label(self.tab.name());
-            ui.label(RichText::new("Ctrl+1…8").small().color(self.muted()));
+            ui.label(RichText::new("Ctrl+1…9").small().color(self.muted()));
             ui.menu_button("视图",|ui|{
                 if ui.checkbox(&mut self.show_explorer,"项目导航").changed(){self.layout_dirty=true;}
                 if ui.checkbox(&mut self.show_inspector,"地址检查器").changed(){self.layout_dirty=true;}
@@ -454,6 +485,7 @@ impl Workbench{
             ui.add_space(8.);
             match self.tab{
                 Tab::Memory=>self.memory_editor(ui),
+                Tab::LocalPlayer=>self.localplayer_editor(ui),
                 Tab::Hex=>self.hex_editor(ui),
                 Tab::Disasm=>self.disasm_editor(ui),
                 Tab::Signature=>self.signature_editor(ui),
@@ -464,6 +496,95 @@ impl Workbench{
             }
         });
     }
+
+    fn localplayer_editor(&mut self,ui:&mut Ui){
+        ui.heading("本地玩家 / LocalPlayer 定位向导");
+        ui.label(RichText::new("开发常用路径：ClientInstance → getLocalPlayer() → LocalPlayer。此页只读，不调用未验证的游戏虚函数。")
+            .color(self.muted()).small());
+        ui.add_space(8.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.strong("第 1 步 · 定位 getLocalPlayer 虚表索引");
+            ui.label("参考已有客户端的已知特征，在当前游戏 EXE 可执行内存中寻找唯一匹配。");
+            if ui.add_enabled(!self.engine.busy,egui::Button::new("扫描参考特征（游戏主 EXE）")).clicked(){
+                self.job(Command::FindLocalPlayerIndex);
+            }
+            if ui.button("把参考特征复制到 AOB 工作区").clicked(){
+                self.aob=local_player::INDEX_REFERENCE_AOB.into();
+                self.tab=Tab::Signature;
+            }
+            if let Some(index)=self.player_index_hit{
+                ui.label(RichText::new(format!("候选虚表索引：{index}（尚未验证）"))
+                    .color(GREEN).strong());
+            }
+            ui.label(RichText::new("找不到匹配或匹配多项时，不猜测索引。其他游戏版本需重新验证。").small().color(self.muted()));
+        });
+        ui.add_space(12.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.strong("第 2 步 · 输入 ClientInstance 来源");
+            ui.horizontal_wrapped(|ui|{
+                ui.label("地址");
+                ui.add(TextEdit::singleline(&mut self.player_source).desired_width(220.));
+                egui::ComboBox::from_id_salt("player-source-mode")
+                    .selected_text(self.player_source_kind.label()).show_ui(ui,|ui|{
+                    for kind in [SourceKind::DirectInstance,SourceKind::PointerSlot]{
+                        ui.selectable_value(&mut self.player_source_kind,kind,kind.label());
+                    }
+                });
+            });
+            ui.label(RichText::new("来源应先通过客户端初始化调用点/已确认的 ClientInstance 指针获取；不能凭虚表索引推断对象地址。").small().color(self.muted()));
+            ui.horizontal_wrapped(|ui|{
+                ui.selectable_value(&mut self.player_access_vtable,true,"虚表函数索引（新版推荐）");
+                ui.selectable_value(&mut self.player_access_vtable,false,"成员指针偏移（仅明确版本）");
+            });
+            ui.horizontal_wrapped(|ui|{
+                ui.label(if self.player_access_vtable{"索引（十进制或 0x）"}else{"成员偏移（十进制或 0x）"});
+                ui.add(TextEdit::singleline(&mut self.player_offset).desired_width(120.));
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("只读检查候选")).clicked(){
+                    let params=memory::parse_address(&self.player_source)
+                        .and_then(|source|local_player::parse_offset(&self.player_offset).map(|offset|(source,offset)));
+                    match params{
+                        Ok((source,offset))=>{
+                            self.player_candidate=None;
+                            let access=if self.player_access_vtable {
+                                PlayerAccess::VtableIndex(offset)
+                            }else{PlayerAccess::MemberOffset(offset)};
+                            self.job(Command::ProbeLocalPlayer{
+                                source,kind:self.player_source_kind,access,
+                            });
+                        }
+                        Err(e)=>self.log(format!("输入无效：{e}"))
+                    }
+                }
+            });
+        });
+        ui.add_space(12.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.strong("第 3 步 · 验证、保存并导出版本定位规则");
+            if self.player_lines.is_empty(){
+                ui.label("等待候选检查。进入世界后再次检查；退出世界时验证空指针与生命周期变化。");
+            }
+            for line in &self.player_lines {ui.label(line);}
+            if let Some(candidate)=self.player_candidate.clone(){
+                ui.add_space(6.);
+                if ui.button("保存该版本的候选定位规则").clicked(){
+                    match crate::project::save_local_player_recipe(&candidate){
+                        Ok(path)=>{
+                            self.log(format!("本地玩家候选规则已保存：{path}"));
+                            self.player_profiles=crate::project::local_player_recipes().unwrap_or_default();
+                        }
+                        Err(e)=>self.log(format!("保存失败：{e}"))
+                    }
+                }
+                ui.label(RichText::new("规则标识为 candidate-only；不包含运行时绝对指针，不等于已确认 LocalPlayer 类型和稳定 ABI。").small().color(self.muted()));
+            }
+            ui.separator();
+            ui.strong(format!("已保存版本规则（{}）",self.player_profiles.len()));
+            for line in self.player_profiles.iter().rev().take(6) {
+                ui.label(RichText::new(line).monospace().small());
+            }
+        });
+    }
+
     fn memory_editor(&mut self,ui:&mut Ui){
         ui.heading("内存扫描");
         ui.label(RichText::new("按指定权限扫描本游戏进程，工作线程运行；可限制地址区间与读取预算").color(self.muted()).small());
@@ -689,7 +810,7 @@ impl Workbench{
         });
         ui.label("底部控制台高度");if ui.add(egui::Slider::new(&mut self.bottom_height,90. ..= 340.)).changed(){self.layout_dirty=true;}
         ui.label("核心：Rust + egui + DX11 · 所有调试功能在 DevTools DLL 内");
-        ui.label("快捷键：Ctrl+1…8 切换工作台标签");
+        ui.label("快捷键：Ctrl+1…9 切换工作台标签");
         ui.label("监视表：保存于 %LOCALAPPDATA%/BLoader-DevTools/watches.json");
         ui.label("BLoader 只负责加载、生命周期以及宿主日志；不提供扫描、脚本和 Hook 解析。");
         ui.label("作者：Chlna6666 · GPL-3.0-only");
@@ -803,7 +924,7 @@ mod tests {
         for (input,label) in [
             ("memory","内存扫描"),("hex","十六进制"),("disasm","反汇编"),
             ("signature","AOB 特征"),("script","脚本实验室"),
-            ("migration","版本迁移"),("hooks","模块 / Hook"),("settings","设置"),
+            ("migration","版本迁移"),("hooks","模块 / Hook"),("settings","设置"),("localplayer","本地玩家定位"),
         ] {
             ui.navigate(input).unwrap();
             assert_eq!(ui.tab.name(),label);

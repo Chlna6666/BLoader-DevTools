@@ -138,6 +138,12 @@ pub enum Command {
     Watch(Vec<(usize,ValueKind)>),
     Assert {address:usize,kind:ValueKind,expected:String},
     Wait(u64),
+    ProbeLocalPlayer{
+        source:usize,
+        kind:crate::local_player::SourceKind,
+        access:crate::local_player::PlayerAccess,
+    },
+    FindLocalPlayerIndex,
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -149,10 +155,13 @@ pub struct Report {
     pub dump_base:usize,
     pub watch_values:Vec<(usize,ValueKind,String)>,
     pub ok:bool,
+    pub player_candidate:Option<crate::local_player::Candidate>,
+    pub index_candidate:Option<usize>,
 }
 impl Report {
     fn new(title:&str,kind:ValueKind)->Self{
-        Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new(),ok:true}
+        Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new(),ok:true,
+            player_candidate:None,index_candidate:None}
     }
 }
 pub fn parse_address(raw:&str)->Result<usize,String>{
@@ -270,6 +279,54 @@ impl ScanState{
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::ProbeLocalPlayer{source,kind,access}=>{
+                let mut r=Report::new("本地玩家候选检查",self.kind);
+                match crate::local_player::probe(source,kind,access) {
+                    Ok(candidate)=>{
+                        r.lines=crate::local_player::format_candidate(&candidate);
+                        r.player_candidate=Some(candidate);
+                    }
+                    Err(e)=>{r.ok=false;r.lines.push(format!("检查失败：{e}"));}
+                }
+                r
+            },
+            Command::FindLocalPlayerIndex=>{
+                let mut r=Report::new("本地玩家虚表索引特征",self.kind);
+                let (start,len)=match crate::inspection::main_image_range(){
+                    Ok(v)=>v,Err(e)=>{r.ok=false;r.lines.push(e);return r;}
+                };
+                // The reference signature is historical. Never accept multiple
+                // matches and never auto-execute a resolved game method.
+                let options=ScanOptions{
+                    start,end:start.saturating_add(len),
+                    scope:ScanScope::Executable,
+                    budget_mib:len.div_ceil(1024*1024).clamp(16,MAX_SCAN_MIB),
+                };
+                let saved_hits=std::mem::take(&mut self.hits);
+                let mut matches=self.execute(Command::AobRange(
+                    crate::local_player::INDEX_REFERENCE_AOB.to_owned(),options
+                ));
+                r.hits=matches.hits.clone();
+                r.lines.push(format!("游戏主模块=0x{start:X}, image={} MiB, 特征候选={}",
+                    len.div_ceil(1024*1024),r.hits.len()));
+                r.lines.push("使用参考项目的旧特征，只适用于字节模式匹配的构建；不能证明这是当前版本的真实 getter。".into());
+                if r.hits.len()==1 {
+                    match crate::local_player::get_index_at(r.hits[0].address){
+                        Ok(index)=>{
+                            r.index_candidate=Some(index);
+                            r.lines.push(format!("唯一特征匹配，解析候选虚表索引={index}；需要玩家进出世界实机复核。"));
+                        }
+                        Err(e)=>{r.ok=false;r.lines.push(e);}
+                    }
+                }else{
+                    r.ok=false;
+                    r.lines.push("特征匹配非唯一或不存在，未自动推断虚表索引；请使用 AOB 工作台人工检查。".into());
+                }
+                // Prior AOB hits are search results, not persisted player type proofs.
+                matches.hits.clear();
+                self.hits=saved_hits;
+                r
+            },
             Command::Assert{address,kind,expected}=>{
                 let mut r=Report::new("脚本断言",kind);
                 let outcome=kind.encode(&expected).and_then(|target|{

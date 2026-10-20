@@ -212,7 +212,7 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
             },
             {
                 "name":"devtools_navigate",
-                "description":"在真实 DevTools UI 线程切换编辑器标签，支持 memory/hex/disasm/signature/script/migration/hooks/settings。",
+                "description":"在真实 DevTools UI 线程切换编辑器标签，支持 memory/localplayer/hex/disasm/signature/script/migration/hooks/settings。",
                 "inputSchema":{"type":"object","properties":{"tab":{"type":"string"}},"required":["tab"]}
             },
             {
