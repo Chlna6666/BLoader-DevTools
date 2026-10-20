@@ -297,8 +297,10 @@ impl ScanState {
                     let report=self.execute(command);
                     combined.lines.push(format!("--- #{:02} {} ---",index+1,report.title));
                     combined.lines.extend(report.lines);
-                    combined.hits=report.hits;
-                    combined.kind=report.kind;
+                    if matches!(report.title.as_str(), "首次精确扫描"|"再次扫描"|"游戏内特征扫描"|"已重置扫描"){
+                        combined.hits=report.hits;
+                        combined.kind=report.kind;
+                    }
                     if !report.dump.is_empty(){combined.dump=report.dump;combined.dump_base=report.dump_base;}
                 }
                 combined
@@ -378,14 +380,23 @@ impl ScanState {
             }
             Command::Refine(filter,text)=>{
                 let mut r=Report::new("再次扫描",self.kind);
+                if self.hits.is_empty() || self.hits.iter().any(|hit|hit.bytes.len()!=self.kind.size()) {
+                    r.lines.push("没有可用的数值扫描基线；请先执行首次数值扫描。AOB 匹配不能直接用数值变化过滤。".into());
+                    r.hits=self.hits.clone();
+                    return r;
+                }
                 let target=if filter==Filter::Exact{
                     match self.kind.encode(&text){Ok(v)=>Some(v),Err(e)=>{r.lines.push(e);return r}}
                 }else{None};
                 let kind=self.kind;
-                let cancel=self.cancel.clone();
-                self.hits.retain_mut(|hit|{
-                    if cancel.load(Ordering::Acquire){return false;}
-                    let Ok(now)=read(hit.address,kind.size()) else{return false};
+                let mut filtered=Vec::with_capacity(self.hits.len());
+                for hit in &self.hits {
+                    if self.cancel.load(Ordering::Acquire){
+                        r.lines.push("筛选已取消；保留取消前的原候选，未提交部分结果".into());
+                        r.hits=self.hits.clone();
+                        return r;
+                    }
+                    let Ok(now)=read(hit.address,kind.size()) else {continue;};
                     let keep=match filter {
                         Filter::Exact=>target.as_ref().is_some_and(|bytes|*bytes==now),
                         Filter::Changed=>now!=hit.bytes,
@@ -393,8 +404,9 @@ impl ScanState {
                         Filter::Increased=>kind.compare(&now,&hit.bytes).is_gt(),
                         Filter::Decreased=>kind.compare(&now,&hit.bytes).is_lt(),
                     };
-                    if keep{hit.bytes=now}keep
-                });
+                    if keep{filtered.push(Hit{address:hit.address,bytes:now});}
+                }
+                self.hits=filtered;
                 r.hits=self.hits.clone();
                 r.lines.push(format!("过滤后剩余 {} 个候选",r.hits.len()));r
             }
@@ -428,6 +440,7 @@ impl ScanState {
                 }
                 r.lines.push(format!("AOB 匹配 {} 项；已处理 {} MiB；范围={}，预算={} MiB",
                     r.hits.len(),total/1048576,options.scope.label(),options.budget_mib));
+                self.hits=r.hits.clone();
                 r
             }
         }
@@ -442,6 +455,11 @@ mod tests{
         let lo=(1u64<<60).to_le_bytes();
         let hi=((1u64<<60)+1).to_le_bytes();
         assert!(ValueKind::U64.compare(&hi,&lo).is_gt());
+    }
+    #[test]fn compare_unsigned_32_is_exact(){
+        let a=u32::MAX.to_le_bytes();
+        let b=(u32::MAX-1).to_le_bytes();
+        assert!(ValueKind::U32.compare(&a,&b).is_gt());
     }
     #[test]fn options_reject_invalid_bounds(){
         assert!(ScanOptions{start:0x20000,end:0x10000,..Default::default()}.validate().is_err());

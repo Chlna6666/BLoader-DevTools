@@ -1,6 +1,22 @@
 //! Self-contained offline feature manifests and cross-build AOB validation.
 use serde_json::{json,Value};
-use std::{fs,path::PathBuf};
+use std::{fs,path::PathBuf,os::windows::ffi::OsStrExt,iter};
+#[link(name="kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(source:*const u16,destination:*const u16,flags:u32)->i32;
+}
+fn replace_file_windows(temp:&std::path::Path,target:&std::path::Path)->Result<(),String>{
+    // Replace existing feature DB atomically on NTFS; std::fs::rename fails when
+    // the destination already exists under normal Windows semantics.
+    let from=temp.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
+    let to=target.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
+    const REPLACE_EXISTING:u32=1;
+    const WRITE_THROUGH:u32=8;
+    if unsafe{MoveFileExW(from.as_ptr(),to.as_ptr(),REPLACE_EXISTING|WRITE_THROUGH)}==0 {
+        return Err(format!("保存特征档案失败：{}",std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
 use crate::signature::Pattern;
 const MAX_FILE:usize=160*1024*1024;
 fn root()->Result<PathBuf,String>{
@@ -38,11 +54,15 @@ pub fn save_feature(name:&str,pattern:&str)->Result<String,String>{
     if entries.len()>2048{return Err("特征档案条目超过上限".into());}
     let tmp=root()?.join("features.json.tmp");
     fs::write(&tmp,serde_json::to_vec_pretty(&entries).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-    fs::rename(&tmp,&path).map_err(|e|e.to_string())?;
+    replace_file_windows(&tmp,&path)?;
     Ok(path.display().to_string())
 }
 pub fn features()->Result<Vec<(String,String)>,String>{
-    let raw=fs::read_to_string(root()?.join("features.json")).unwrap_or_else(|_|"[]".into());
+    let raw=match fs::read_to_string(root()?.join("features.json")){
+        Ok(raw)=>raw,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>"[]".into(),
+        Err(e)=>return Err(format!("读取特征数据库失败：{e}")),
+    };
     let values:Vec<Value>=serde_json::from_str(&raw).map_err(|e|e.to_string())?;
     Ok(values.into_iter().filter_map(|v|
         Some((v.get("feature")?.as_str()?.to_owned(),v.get("aob")?.as_str()?.to_owned()))

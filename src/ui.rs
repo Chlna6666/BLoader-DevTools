@@ -164,7 +164,7 @@ impl Workbench{
             self.tab.name(),self.engine.busy,self.hits.len(),self.watches.len(),
             self.show_explorer,self.show_inspector,self.show_console,recent)
     }
-    pub fn needs_poll(&self)->bool{self.engine.busy || !self.watches.is_empty()}
+    pub fn needs_poll(&self)->bool{self.engine.busy || (!self.watches.is_empty() && self.watch_due.elapsed()>=Duration::from_millis(700))}
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
     fn panel(&self)->Color32{if self.dark{PANEL}else{Color32::WHITE}}
     fn muted(&self)->Color32{if self.dark{MUTED}else{Color32::from_rgb(83,96,113)}}
@@ -521,6 +521,15 @@ impl Workbench{
         ui.heading("脚本实验室");
         ui.label(RichText::new("CE 风格研究脚本（安全 DSL）。支持 scan / next / read / disasm / aob / write / reset，不执行任意汇编。").color(self.muted()).small());
         ui.add(TextEdit::multiline(&mut self.script).code_editor().desired_rows(12).desired_width(f32::INFINITY));
+        ui.horizontal(|ui|{
+            if ui.button("检查脚本语法").clicked(){
+                match crate::script::parse(&self.script,self.script_writes){
+                    Ok(commands)=>self.log(format!("语法检查通过：{} 条可执行命令",commands.len())),
+                    Err(error)=>self.log(format!("语法检查失败：{error}")),
+                }
+            }
+            ui.label(RichText::new("脚本不会调用任意系统命令；修改数据需显式授权。").small().color(self.muted()));
+        });
         ui.checkbox(&mut self.script_writes,"此轮运行允许 write 写入（必须提供预期旧值）");
         ui.horizontal_wrapped(|ui|{
             if ui.add_enabled(!self.engine.busy,egui::Button::new("运行脚本")).clicked(){
@@ -679,5 +688,32 @@ impl Workbench{
                     ui.label(RichText::new(line).monospace().size(12.));
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ide_navigation_resolves_real_tabs(){
+        let mut ui=Workbench::default();
+        for (input,label) in [
+            ("memory","内存扫描"),("hex","十六进制"),("disasm","反汇编"),
+            ("signature","AOB 特征"),("script","脚本实验室"),
+            ("migration","版本迁移"),("hooks","模块 / Hook"),("settings","设置"),
+        ] {
+            ui.navigate(input).unwrap();
+            assert_eq!(ui.tab.name(),label);
+        }
+        assert!(ui.navigate("missing").is_err());
+    }
+    #[test]
+    fn scan_options_validate_ui_bounds(){
+        let mut ui=Workbench::default();
+        ui.start_addr="0x20000".into();
+        ui.end_addr="0x10000".into();
+        assert!(ui.scan_options().is_err());
+        ui.end_addr="0x30000".into();
+        assert!(ui.scan_options().is_ok());
     }
 }
