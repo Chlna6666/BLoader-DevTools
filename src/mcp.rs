@@ -15,13 +15,13 @@ use serde_json::{Value, json};
 use windows_sys::Win32::{
     Foundation::{HWND,POINT},
     Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
         DIB_RGB_COLORS, DeleteDC, DeleteObject, SelectObject,
     },
     UI::Input::KeyboardAndMouse::{INPUT,INPUT_MOUSE,MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_LEFTUP,SendInput},
     UI::WindowsAndMessaging::{
         GetClientRect, IsWindow, GetWindowThreadProcessId, GetClassNameW, GetWindowTextW,
-        GetForegroundWindow, SetForegroundWindow, ClientToScreen, SetCursorPos, PostMessageW, WM_LBUTTONDOWN,
+        GetForegroundWindow, SetForegroundWindow, SetCursorPos, PostMessageW, WM_LBUTTONDOWN,
         WM_LBUTTONUP, WM_MOUSEMOVE,
     },
 };
