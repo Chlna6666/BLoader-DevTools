@@ -5,8 +5,8 @@
 //! localhost-only socket, Origin rejection and tightly scoped commands.
 
 use std::{
-    collections::VecDeque, ffi::c_void, io::{Read, Write}, mem, net::{TcpListener, TcpStream},
-    ptr, sync::{Arc, Mutex, mpsc::{self, SyncSender}, atomic::{AtomicBool, Ordering}},
+    collections::VecDeque, io::{Read, Write}, mem, net::{TcpListener, TcpStream},
+    sync::{Arc, Mutex, mpsc::{self, SyncSender}, atomic::{AtomicBool, Ordering}},
     thread::{self, JoinHandle}, time::Duration,
 };
 
@@ -14,10 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use windows_sys::Win32::{
     Foundation::{HWND,POINT},
-    Graphics::Gdi::{
-        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, SelectObject,
-    },
+    Graphics::Gdi::ClientToScreen,
     UI::Input::KeyboardAndMouse::{INPUT,INPUT_MOUSE,MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_LEFTUP,SendInput},
     UI::WindowsAndMessaging::{
         GetClientRect, IsWindow, GetWindowThreadProcessId, GetClassNameW, GetWindowTextW,
@@ -26,11 +23,6 @@ use windows_sys::Win32::{
     },
 };
 use crate::{info, warn, window};
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn PrintWindow(hwnd: HWND, dc: *mut c_void, flags: u32) -> i32;
-}
 
 pub struct Connection {
     running: Arc<AtomicBool>,
@@ -389,56 +381,6 @@ fn call_tool(request:&Value) -> Value {
     }
 }
 
-/// GDI window capture. Some DirectX/RenderDragon targets don't support
-/// PrintWindow: fail explicitly on empty/dark captures rather than claim success.
-/// The screenshot tool intentionally doesn't hook Minecraft's rendering pipeline.
-fn capture_gdi(hwnd: HWND, width:u32, height:u32) -> Result<Vec<u8>,String> {
-    let (w,h)=(width as i32,height as i32);
-    unsafe {
-        let dc=CreateCompatibleDC(ptr::null_mut());
-        if dc.is_null() { return Err("CreateCompatibleDC 失败".into()); }
-        let mut info:BITMAPINFO=mem::zeroed();
-        info.bmiHeader.biSize=mem::size_of::<BITMAPINFOHEADER>() as u32;
-        info.bmiHeader.biWidth=w;
-        info.bmiHeader.biHeight=-h; // top-down
-        info.bmiHeader.biPlanes=1;
-        info.bmiHeader.biBitCount=32;
-        info.bmiHeader.biCompression=BI_RGB;
-        let mut raw:*mut c_void=ptr::null_mut();
-        let bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&mut raw,ptr::null_mut(),0);
-        if bitmap.is_null() {
-            DeleteDC(dc);
-            return Err("CreateDIBSection 失败".into());
-        }
-        let old=SelectObject(dc,bitmap);
-        let ok=PrintWindow(hwnd,dc,2);
-        let pixels=if ok!=0 && !raw.is_null() {
-            std::slice::from_raw_parts(raw as *const u8, (width as usize)*(height as usize)*4)
-                .to_vec()
-        } else { Vec::new() };
-        SelectObject(dc,old);
-        DeleteObject(bitmap);
-        DeleteDC(dc);
-        if pixels.is_empty() { return Err("PrintWindow 未能截取窗口；游戏可能使用不支持 GDI 读回的 GPU 表面".into()); }
-        if pixels.chunks_exact(4).take(32000).all(|p| p[0]==0 && p[1]==0 && p[2]==0) {
-            return Err("捕获画面全黑；D3D/UWP 游戏表面需要 DXGI 或 Windows Graphics Capture".into());
-        }
-        let mut rgba=pixels;
-        for pixel in rgba.chunks_exact_mut(4) {
-            pixel.swap(0,2);
-            pixel[3]=255;
-        }
-        let mut out=Vec::new();
-        {
-            let mut encoder=png::Encoder::new(&mut out,width,height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer=encoder.write_header().map_err(|e| e.to_string())?;
-            writer.write_image_data(&rgba).map_err(|e| e.to_string())?;
-        }
-        Ok(out)
-    }
-}
 
 #[cfg(test)]
 mod tests {

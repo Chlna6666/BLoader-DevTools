@@ -8,6 +8,7 @@ mod script;
 mod project;
 mod inspection;
 mod mcp;
+mod capture;
 mod ui;
 mod window;
 

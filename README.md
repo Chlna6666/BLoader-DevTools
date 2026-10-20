@@ -1,6 +1,6 @@
 # BLoader DevTools
 
-版本：0.2.0 · 作者：Chlna6666 · GPL-3.0-only
+版本：0.2.1 · 作者：Chlna6666 · GPL-3.0-only
 
 项目：https://github.com/Chlna6666/BLoader-DevTools
 
@@ -66,13 +66,23 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 - 特征数据库写回改用 Windows 文件替换机制，避免第二次保存已有特征时文件重名失败。
 - 仍待实现完全可拖拽的 IntelliJ IDEA 停靠面板、CE AutoAssembler、硬件断点、指针扫描、真正 RenderDragon 帧捕获与跨版本 CFG/ABI 迁移；详见 [DEVTOOLS_TODO.md](DEVTOOLS_TODO.md)。
 
+
+## 0.2.1 游戏窗口截图与可调整工作台
+
+**IDE 面板**：拖拽左右两条分隔线可调整项目栏和地址检查器宽度；拖拽编辑区与底部控制台之间的水平分隔线可调整控制台高度。顶部「视图」菜单控制面板显隐和重置默认布局；尺寸与显隐状态保存于 %LOCALAPPDATA%\BLoader-DevTools\layout.json，下次启动恢复。窄窗口下检查器采用浮动窗口。该布局还不是 IntelliJ 那种任意停靠树和标签拆分。
+
+**游戏画面 MCP 截图**：\`capture_window(target="game",mode="auto")\` 在 Minecraft 处于前台且可见时先尝试捕获 Windows *桌面合成后的客户区画面*；不可用时退回实验性 \`PrintWindow\`。可用 \`mode="desktop"\` 或 \`mode="printwindow"\` 强制对比方法。对于 4K 等高分辨率游戏窗口，桌面合成截图会按像素预算缩小 PNG，但 \`window_info\` 和 \`click_window\` 不再因窗口超过 1920×1080 而被拒绝。返回文本会分别标注原客户区分辨率与输出 PNG 分辨率，点击依然使用**原始游戏客户区坐标**。
+
+桌面合成画面**不是游戏 RenderDragon 内部 Backbuffer**；前台窗口被遮挡、特殊全屏、远程串流仅捕获游戏画面、桌面 DPI 配置等情况下，图片可能不完整甚至失败。真正的 Windows Graphics Capture / DXGI 纹理安全读回仍是后续任务，不将这一回退称为完整游戏 GPU 截图。
+
+
 ## MCP 与游戏窗口修复
 
 MCP 默认关闭，在 DevTools 设置页手动开启，只监听 127.0.0.1，使用随机 Bearer token。连接方式见设置页；云端 ChatGPT 不能直接访问本机回环地址。
 
 - window_info(target=game) 每次重新枚举 class=Bedrock、title=Minecraft 等有效窗口，支持属于其他 UWP 宿主 PID 的 HWND。返回句柄、PID、类名、标题与客户区大小，不再使用启动时的一次性过期缓存。
 - capture_window(target=devtools) 使用 DevTools 的 D3D11 GPU staging 读回生成 PNG。
-- capture_window(target=game) 目前实验性 PrintWindow，**不保证 RenderDragon/DX11/DX12/UWP 画面正确**；黑屏作为失败处理。完整游戏帧捕获仍需后续 WGC 或安全的 GPU 读回通道。
+- capture_window(target=game) 先尝试前台可见桌面合成截图，后退为实验性 PrintWindow，**不保证 RenderDragon/DX11/DX12/UWP 画面正确**；黑屏作为失败处理。完整游戏帧捕获仍需后续 WGC 或安全的 GPU 读回通道。
 - click_window(target=game,x=...,y=...) 默认使用 SendInput 模拟前台真实鼠标操作：尝试激活游戏、将客户区坐标转换为屏幕位置，再发送鼠标按下和释放。
 - click_window(target=game,mode=message,x=...,y=...) 使用旧版 PostMessage，便于比较 Raw Input 与 Win32 消息；游戏可能忽略此模式。
 - click_window(target=devtools,x=...,y=...) 默认使用 Win32 消息。

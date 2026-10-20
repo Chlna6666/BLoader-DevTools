@@ -25,6 +25,68 @@ fn root()->Result<PathBuf,String>{
     fs::create_dir_all(&folder).map_err(|e|e.to_string())?;
     Ok(folder)
 }
+
+/// Persisted tool-window layout. Values are in egui logical points and bounded
+/// on load to prevent offscreen or unusably small IDE panels.
+#[derive(Clone,Debug)]
+pub struct LayoutSettings {
+    pub explorer_width:f32,
+    pub inspector_width:f32,
+    pub console_height:f32,
+    pub explorer_visible:bool,
+    pub inspector_visible:bool,
+    pub console_visible:bool,
+}
+impl Default for LayoutSettings {
+    fn default()->Self{Self{
+        explorer_width:185.,inspector_width:225.,console_height:155.,
+        explorer_visible:true,inspector_visible:true,console_visible:true
+    }}
+}
+fn decode_layout(raw:&str)->Result<LayoutSettings,String>{
+    let doc:Value=serde_json::from_str(raw).map_err(|e|e.to_string())?;
+    let default=LayoutSettings::default();
+    let bound=|field:&str,initial:f32,lo:f32,hi:f32|{
+        doc[field].as_f64().filter(|v|v.is_finite())
+            .map_or(initial,|n|(n as f32).clamp(lo,hi))
+    };
+    Ok(LayoutSettings{
+        explorer_width:bound("explorer_width",default.explorer_width,130.,400.),
+        inspector_width:bound("inspector_width",default.inspector_width,165.,430.),
+        console_height:bound("console_height",default.console_height,90.,340.),
+        explorer_visible:doc["explorer_visible"].as_bool().unwrap_or(true),
+        inspector_visible:doc["inspector_visible"].as_bool().unwrap_or(true),
+        console_visible:doc["console_visible"].as_bool().unwrap_or(true),
+    })
+}
+pub fn load_layout()->Result<LayoutSettings,String>{
+    let path=root()?.join("layout.json");
+    let raw=match fs::read_to_string(&path){
+        Ok(s)=>s,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(LayoutSettings::default()),
+        Err(e)=>return Err(e.to_string()),
+    };
+    if raw.len()>8192{return Err("layout.json 超过 8 KiB 限制".into());}
+    decode_layout(&raw)
+}
+pub fn save_layout(layout:&LayoutSettings)->Result<String,String>{
+    let data=json!({
+        "version":1,
+        "explorer_width":layout.explorer_width.clamp(130.,400.),
+        "inspector_width":layout.inspector_width.clamp(165.,430.),
+        "console_height":layout.console_height.clamp(90.,340.),
+        "explorer_visible":layout.explorer_visible,
+        "inspector_visible":layout.inspector_visible,
+        "console_visible":layout.console_visible
+    });
+    let folder=root()?;
+    let target=folder.join("layout.json");
+    let staging=folder.join("layout.json.tmp");
+    fs::write(&staging,serde_json::to_vec(&data).map_err(|e|e.to_string())?)
+        .map_err(|e|e.to_string())?;
+    replace_file_windows(&staging,&target)?;
+    Ok(target.display().to_string())
+}
 pub fn save_script(source:&str)->Result<String,String>{
     if source.len()>64*1024{return Err("脚本超过 64 KiB 上限".into());}
     let target=root()?.join("workspace.bldscript");
@@ -134,7 +196,14 @@ pub fn compare(old:&str,new:&str,aob:&str)->Result<Vec<String>,String>{
 #[cfg(test)]
 mod tests{
     use super::*;
-    #[test]fn manifest_rejects_invalid_pattern(){assert!(Pattern::parse("GG").is_err());}
+    #[test]fn ide_layout_clamps_invalid_widths(){
+        let parsed=decode_layout(r#"{"explorer_width":9999,"inspector_width":1,"console_height":-400,"console_visible":false}"#).unwrap();
+        assert_eq!(parsed.explorer_width,400.);
+        assert_eq!(parsed.inspector_width,165.);
+        assert_eq!(parsed.console_height,90.);
+        assert!(!parsed.console_visible);
+    }
+        #[test]fn manifest_rejects_invalid_pattern(){assert!(Pattern::parse("GG").is_err());}
     #[test]fn watch_list_deduplicates_and_skips_bad_entries(){
         let entries=decode_watches(r#"[{"address":"0x20000","kind":"Float"},{"address":"0x20000","kind":"Float"},{"address":"garbage","kind":"Double"}]"#).unwrap();
         assert_eq!(entries.len(),1);

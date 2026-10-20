@@ -7,6 +7,7 @@ use crate::{
 };
 use egui::{Align,Color32,FontFamily,FontId,Frame,Layout,RichText,ScrollArea,Stroke,TextEdit,Ui,Vec2};
 use std::{collections::VecDeque,time::{Duration,Instant}};
+use crate::project::LayoutSettings;
 #[derive(Clone)]
 struct Watch { address:usize,kind:ValueKind,value:String }
 
@@ -78,6 +79,44 @@ pub fn install_system_fonts(ctx:&egui::Context)->Result<String,String>{
     }
     Err("找不到已安装的中文 Windows 系统字体".into())
 }
+
+/// Resize panes by dragging visible splitter grips. Pointer delta is frame-local,
+/// preventing accumulated overshoot when drag events span multiple frames.
+fn drag_splitter(ui:&mut Ui,id:egui::Id,height:f32,positive:bool,value:&mut f32)->bool{
+    let (rect,response)=ui.allocate_exact_size(
+        Vec2::new(8.,height.max(8.)),egui::Sense::drag()
+    );
+    let _=id;
+    let active=response.dragged() || response.hovered();
+    ui.painter().rect_filled(rect.shrink2(Vec2::new(2.,8.)),3.,
+        if active{ACCENT}else{LINE});
+    if active {ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);}
+    if response.dragged() {
+        let dx=ui.input(|input|input.pointer.delta().x);
+        if dx!=0. {
+            *value=(*value+if positive{dx}else{-dx})
+                .clamp(if positive{130.}else{165.},if positive{400.}else{430.});
+            return true;
+        }
+    }
+    false
+}
+fn drag_console_split(ui:&mut Ui,width:f32,height:&mut f32)->bool{
+    let (rect,response)=ui.allocate_exact_size(Vec2::new(width.max(1.),8.),egui::Sense::drag());
+    let active=response.hovered()||response.dragged();
+    ui.painter().rect_filled(rect.shrink2(Vec2::new(12.,2.)),3.,
+        if active{ACCENT}else{LINE});
+    if active{ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);}
+    if response.dragged() {
+        let dy=ui.input(|input|input.pointer.delta().y);
+        if dy!=0. {
+            *height=(*height-dy).clamp(90.,340.);
+            return true;
+        }
+    }
+    false
+}
+
 pub struct Workbench {
     tab:Tab,
     pub hide_requested:bool,
@@ -119,9 +158,11 @@ pub struct Workbench {
     show_explorer:bool,
     show_inspector:bool,
     show_console:bool,
+    layout_dirty:bool,
 }
 impl Default for Workbench{
     fn default()->Self{
+        let layout=crate::project::load_layout().unwrap_or_default();
         Self {
             tab:Tab::Memory,hide_requested:false,engine:Engine::start(),
             console:VecDeque::from(["DevTools 工作区已就绪；扫描、解析和脚本在专用后台线程运行。".into()]),
@@ -135,14 +176,17 @@ impl Default for Workbench{
             features:crate::project::features().unwrap_or_default(),
             script:crate::project::load_script().unwrap_or_else(|_|crate::script::EXAMPLE.into()),
             script_writes:false,old_file:String::new(),new_file:String::new(),
-            dark:true,left_width:178.,right_width:215.,bottom_height:142.,
+            dark:true,left_width:layout.explorer_width,
+            right_width:layout.inspector_width,bottom_height:layout.console_height,
             selected_hit:None,hit_page:0,scan_scope:ScanScope::Writable,
             scan_budget:128,start_addr:"0x10000".into(),end_addr:"最大地址".into(),
             watches:crate::project::load_watches().unwrap_or_default().into_iter()
                 .map(|(address,kind)|Watch{address,kind,value:"等待刷新".into()})
                 .collect(),
             watch_due:Instant::now(),
-            show_explorer:true,show_inspector:true,show_console:true,
+            show_explorer:layout.explorer_visible,
+            show_inspector:layout.inspector_visible,
+            show_console:layout.console_visible,layout_dirty:false,
         }
     }
 }
@@ -171,6 +215,19 @@ impl Workbench{
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
     fn panel(&self)->Color32{if self.dark{PANEL}else{Color32::WHITE}}
     fn muted(&self)->Color32{if self.dark{MUTED}else{Color32::from_rgb(83,96,113)}}
+    fn persist_layout(&mut self) {
+        if !self.layout_dirty{return;}
+        let layout=LayoutSettings{
+            explorer_width:self.left_width,inspector_width:self.right_width,
+            console_height:self.bottom_height,
+            explorer_visible:self.show_explorer,inspector_visible:self.show_inspector,
+            console_visible:self.show_console,
+        };
+        match crate::project::save_layout(&layout){
+            Ok(_)=>self.layout_dirty=false,
+            Err(e)=>{self.layout_dirty=false;self.log(format!("保存界面布局失败：{e}"));}
+        }
+    }
     fn log(&mut self,message:impl Into<String>){
         self.console.push_back(message.into());
         while self.console.len()>280{self.console.pop_front();}
@@ -252,9 +309,15 @@ impl Workbench{
         let viewport=ui.available_size();
         let width=viewport.x.max(320.);
         let height=viewport.y.max(320.);
-        let left=if self.show_explorer && width>600. {self.left_width.min(width*0.27)}else{0.};
-        let right=if self.show_inspector && width>850. {self.right_width.min(width*0.26)}else{0.};
-        let bottom=if self.show_console{self.bottom_height.min(height*0.32)}else{0.};
+        let left=if self.show_explorer && width>630. {
+            self.left_width.clamp(130.,(width-300.).max(130.))
+        }else{0.};
+        let right=if self.show_inspector && width>950. {
+            self.right_width.clamp(165.,(width-left-360.).max(165.))
+        }else{0.};
+        let bottom=if self.show_console {
+            self.bottom_height.clamp(90.,(height-190.).max(90.))
+        }else{0.};
         // Primary toolbar / breadcrumb.
         ui.allocate_ui_with_layout(Vec2::new(width,43.),Layout::left_to_right(Align::Center),|ui|{
             ui.add_space(12.);
@@ -265,9 +328,23 @@ impl Workbench{
             ui.label(RichText::new(" / ").color(self.muted()));
             ui.label(self.tab.name());
             ui.label(RichText::new("Ctrl+1…8").small().color(self.muted()));
-            if ui.small_button(if self.show_explorer{"隐藏项目"}else{"项目"}).clicked(){self.show_explorer=!self.show_explorer;}
-            if ui.small_button(if self.show_inspector{"隐藏检查器"}else{"检查器"}).clicked(){self.show_inspector=!self.show_inspector;}
-            if ui.small_button(if self.show_console{"隐藏控制台"}else{"控制台"}).clicked(){self.show_console=!self.show_console;}
+            ui.menu_button("视图",|ui|{
+                if ui.checkbox(&mut self.show_explorer,"项目导航").changed(){self.layout_dirty=true;}
+                if ui.checkbox(&mut self.show_inspector,"地址检查器").changed(){self.layout_dirty=true;}
+                if ui.checkbox(&mut self.show_console,"底部控制台").changed(){self.layout_dirty=true;}
+                ui.separator();
+                if ui.button("恢复默认布局").clicked(){
+                    let defaults=LayoutSettings::default();
+                    self.left_width=defaults.explorer_width;
+                    self.right_width=defaults.inspector_width;
+                    self.bottom_height=defaults.console_height;
+                    self.show_explorer=true;
+                    self.show_inspector=true;
+                    self.show_console=true;
+                    self.layout_dirty=true;
+                    ui.close();
+                }
+            });
             ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
                 if ui.button("设置").clicked(){self.tab=Tab::Settings;}
                 if self.engine.busy {ui.spinner();ui.label("后台任务中");if ui.button("取消任务").clicked(){self.engine.cancel();}}
@@ -281,21 +358,25 @@ impl Workbench{
                 ui.allocate_ui_with_layout(Vec2::new(left,main_height),Layout::top_down(Align::Min),|ui|{
                     self.left_panel(ui);
                 });
-                ui.separator();
+                if drag_splitter(ui,egui::Id::new("explorer_split"),main_height,true,&mut self.left_width){
+                    self.layout_dirty=true;
+                }
             }
-            let mid=(width-left-right-19.).max(180.);
+            let mid=(ui.available_width()-right-(if right>0.{8.}else{0.})).max(180.);
             ui.allocate_ui_with_layout(Vec2::new(mid,main_height),Layout::top_down(Align::Min),|ui|{
                 self.editor(ui);
             });
             if right>0. {
-                ui.separator();
+                if drag_splitter(ui,egui::Id::new("inspector_split"),main_height,false,&mut self.right_width){
+                    self.layout_dirty=true;
+                }
                 ui.allocate_ui_with_layout(Vec2::new(right,main_height),Layout::top_down(Align::Min),|ui|{
                     self.inspector(ui);
                 });
             }
         });
         if bottom>0.{
-            ui.separator();
+            if drag_console_split(ui,width,&mut self.bottom_height){self.layout_dirty=true;}
             ui.allocate_ui_with_layout(Vec2::new(width,bottom),Layout::top_down(Align::Min),|ui|{
                 self.bottom_panel(ui);
             });
@@ -308,9 +389,15 @@ impl Workbench{
                 .id(egui::Id::new("compact_inspector"))
                 .open(&mut open).resizable(true).default_width(275.)
                 .show(&ctx,|ui|self.inspector(ui));
-            if !open {self.show_inspector=false;}
+            if !open {
+                self.show_inspector=false;
+                self.layout_dirty=true;
+            }
         }
         ui.separator();
+        if self.layout_dirty && ui.input(|input|!input.pointer.any_down()){
+            self.persist_layout();
+        }
         ui.horizontal(|ui|{
             ui.add_space(10.);
             ui.label(RichText::new(format!("BLoader DevTools v{}  ·  GPL-3.0-only",env!("CARGO_PKG_VERSION"))).color(self.muted()).small());
@@ -351,9 +438,9 @@ impl Workbench{
         ui.separator();
         ui.collapsing("面板布局",|ui|{
             ui.label("左栏宽度");
-            ui.add(egui::Slider::new(&mut self.left_width,130. ..= 270.));
+            if ui.add(egui::Slider::new(&mut self.left_width,130. ..= 400.)).changed(){self.layout_dirty=true;}
             ui.label("检查器宽度");
-            ui.add(egui::Slider::new(&mut self.right_width,165. ..= 340.));
+            if ui.add(egui::Slider::new(&mut self.right_width,165. ..= 430.)).changed(){self.layout_dirty=true;}
         });
     }
     fn editor(&mut self,ui:&mut Ui){
@@ -600,7 +687,7 @@ impl Workbench{
                 self.dark=false;configure_appearance(ui.ctx(),false);
             }
         });
-        ui.label("底部控制台高度");ui.add(egui::Slider::new(&mut self.bottom_height,100. ..= 340.));
+        ui.label("底部控制台高度");if ui.add(egui::Slider::new(&mut self.bottom_height,90. ..= 340.)).changed(){self.layout_dirty=true;}
         ui.label("核心：Rust + egui + DX11 · 所有调试功能在 DevTools DLL 内");
         ui.label("快捷键：Ctrl+1…8 切换工作台标签");
         ui.label("监视表：保存于 %LOCALAPPDATA%/BLoader-DevTools/watches.json");
