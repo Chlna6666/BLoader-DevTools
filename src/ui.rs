@@ -63,7 +63,8 @@ impl Default for Workbench {
 }
 
 pub fn configure_appearance(ctx: &egui::Context, dark: bool) {
-    let mut style = (*ctx.style()).clone();
+    let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
+    let mut style = (*ctx.style_of(theme)).clone();
     let mut visuals = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
     if dark {
         visuals.panel_fill = BACKGROUND;
@@ -90,7 +91,8 @@ pub fn configure_appearance(ctx: &egui::Context, dark: bool) {
     style.text_styles.insert(egui::TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));
     style.text_styles.insert(egui::TextStyle::Heading, FontId::new(23.0, FontFamily::Proportional));
     style.spacing.indent = 18.0;
-    ctx.set_style(style);
+    ctx.set_style_of(theme, style);
+    ctx.set_theme(theme);
 }
 
 /// Load installed Windows CJK fonts; never bundle or export system font files.
@@ -376,6 +378,38 @@ impl Workbench {
             ui.label("启动后自动显示 · F8 为可选热键");
             ui.label("RDP / UWP 窗口识别失败时使用同进程顶层窗口");
         });
+        ui.add_space(14.0);
+        Frame::new().fill(self.surface()).stroke(Stroke::new(1.0, self.line()))
+            .corner_radius(10.0).inner_margin(16.0).show(ui, |ui| {
+                ui.label(RichText::new("AI 测试 / 本机 MCP").size(17.0).strong().color(primary));
+                ui.label("单 DLL 内置 MCP HTTP 端点 · 不启动额外 EXE");
+                ui.label(RichText::new("出于安全考虑默认关闭，仅绑定 127.0.0.1，必须使用临时令牌。")
+                    .color(secondary).size(12.0));
+                if let Some((endpoint,token)) = crate::mcp::status() {
+                    ui.label(RichText::new("已开启 · 允许已授权的本机 AI 客户端调用").color(GREEN));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(&endpoint);
+                        if ui.button("复制 MCP 地址").clicked() {
+                            ui.ctx().copy_text(endpoint.clone());
+                        }
+                        if ui.button("复制连接令牌").clicked() {
+                            ui.ctx().copy_text(token);
+                        }
+                        if ui.button("关闭 MCP").clicked() { crate::mcp::stop(); }
+                    });
+                    ui.label(RichText::new("请求头 Authorization: Bearer <复制的连接令牌>")
+                        .color(secondary).size(12.0));
+                } else {
+                    if ui.button("开启本机 MCP 测试服务").clicked() {
+                        if let Err(err) = crate::mcp::start() {
+                            crate::error(format!("[BLoader DevTools] MCP_START_FAILED: {err}"));
+                        }
+                    }
+                }
+                ui.add_space(4.0);
+                ui.label(RichText::new("当前提供窗口信息、Win32 点击和实验性截图。游戏 GPU 画面可能无法通过 PrintWindow 获取；后续需接入 DXGI / Windows Graphics Capture。")
+                    .color(secondary).size(12.0));
+            });
         ui.add_space(14.0);
         self.card(ui, |ui| {
             ui.label(RichText::new("版本与许可").size(17.0).strong().color(primary));

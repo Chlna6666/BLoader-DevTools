@@ -53,6 +53,10 @@ struct Worker {
     thread: JoinHandle<()>,
 }
 static WORKER: Mutex<Option<Worker>> = Mutex::new(None);
+static UI_HWND: AtomicIsize = AtomicIsize::new(0);
+static GAME_HWND: AtomicIsize = AtomicIsize::new(0);
+pub(crate) fn ui_hwnd() -> isize { UI_HWND.load(Ordering::Acquire) }
+pub(crate) fn game_hwnd() -> isize { GAME_HWND.load(Ordering::Acquire) }
 
 #[derive(Default)]
 struct InputQueue {
@@ -389,6 +393,7 @@ impl Graphics {
 
 fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), String> {
     info("[BLoader DevTools] UI_THREAD_STARTED; searching for Minecraft top-level HWND");
+    GAME_HWND.store(find_game_window().unwrap_or(0), Ordering::Release);
     let remote_session = unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 };
     if remote_session {
         warn("[BLoader DevTools] REMOTE_SESSION_DETECTED; using visible same-process top-level window");
@@ -457,6 +462,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         return Err(format!("CreateWindowExW failed for all modes: win32_error={}", unsafe { GetLastError() }));
     }
     window_slot.store(hwnd as isize, Ordering::Release);
+    UI_HWND.store(hwnd as isize, Ordering::Release);
     info(format!("[BLoader DevTools] UI_WINDOW_CREATED mode={} hwnd=0x{:X}", if is_child { "child" } else { "top-level" }, hwnd as usize));
     // Explicitly show + paint immediately, not when F8 is pressed.
     unsafe { ShowWindow(hwnd, SW_SHOW); }
@@ -466,6 +472,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         warn(format!("[BLoader DevTools] CHILD_D3D11_FAILED: {}; retrying same-process top-level UI",
             graphics_result.as_ref().err().unwrap()));
         window_slot.store(0, Ordering::Release);
+        UI_HWND.store(0, Ordering::Release);
         unsafe { DestroyWindow(hwnd); }
         hwnd = unsafe {
             CreateWindowExW(0, WINDOW_CLASS.as_ptr(), WINDOW_TITLE.as_ptr(),
@@ -478,6 +485,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         }
         is_child = false;
         window_slot.store(hwnd as isize, Ordering::Release);
+        UI_HWND.store(hwnd as isize, Ordering::Release);
         unsafe { ShowWindow(hwnd, SW_SHOW); }
         graphics_result = Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32);
     }
@@ -486,6 +494,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         Err(err) => {
             unsafe { DestroyWindow(hwnd); UnregisterClassW(WINDOW_CLASS.as_ptr(), instance); }
             window_slot.store(0, Ordering::Release);
+            UI_HWND.store(0, Ordering::Release);
             return Err(format!("D3D11 initialization failed: {err}"));
         }
     };
@@ -584,6 +593,8 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     // Drop D3D resources before destroying the child HWND and unregistering its class.
     drop(gfx);
     window_slot.store(0, Ordering::Release);
+    UI_HWND.store(0, Ordering::Release);
+    GAME_HWND.store(0, Ordering::Release);
     unsafe {
         if IsWindow(hwnd) != 0 { DestroyWindow(hwnd); }
         UnregisterClassW(WINDOW_CLASS.as_ptr(), instance);

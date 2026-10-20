@@ -3,6 +3,7 @@
 //! The BL host ABI prefix and BL mod descriptor mirror BLoader/bl-sdk at v0.2.77.
 
 mod signature;
+mod mcp;
 mod ui;
 mod window;
 
@@ -94,7 +95,8 @@ unsafe extern "system" fn on_load(host: *const BlHostPrefix) -> i32 {
 }
 
 unsafe extern "system" fn on_unload() {
-    info("[BLoader DevTools] Unloading: stopping UI worker...");
+    info("[BLoader DevTools] Unloading: stopping MCP and UI worker...");
+    mcp::stop();
     let _ = std::panic::catch_unwind(window::stop);
     info("[BLoader DevTools] UI worker stopped");
 }

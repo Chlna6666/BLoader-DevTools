@@ -18,6 +18,10 @@ api_version = 1
 entry = "bloader_devtools.dll"
 
 [dependencies]
+serde_json = "1"
+base64 = "0.22"
+png = "0.17"
+getrandom = "0.3"
 egui = "0.35.0"
 egui-directx11 = "0.13.0"
 windows = { version = "0.62.2", features = [
