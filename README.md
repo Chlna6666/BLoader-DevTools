@@ -28,7 +28,7 @@ cargo build --release --target x86_64-pc-windows-msvc
 
 项目当前不包含 EXE、后台外部服务或独立进程。无 GUI 时不需要操作游戏 GPU 渲染链路。
 
-**当前验证状态：** 项目初始化代码已提交，但当前执行环境没有 Rust 编译器与 Windows 图形运行环境，尚不能声明 Windows DLL 已成功编译或加载。请在 Windows MSVC 工具链下完成上述构建与实际游戏启动/卸载测试，再进行正式发布。
+**构建验证状态：** GitHub Actions Windows MSVC 构建已通过：2 项单元测试通过，Release `bloader_devtools.dll` 构建成功且产物已上传至 [Windows MSVC DLL #39459235451](https://github.com/Chlna6666/BLoader-DevTools/actions/runs/39459235451)。本次仅验证编译与离线测试，**尚未完成 Minecraft Windows 实机运行、F8 输入、显示与安全卸载验证**，不能将其视为已验证游戏内可用的发布版本。
 
 ## 下一步
 
