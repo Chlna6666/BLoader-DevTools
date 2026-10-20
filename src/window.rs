@@ -22,7 +22,7 @@ use windows_sys::Win32::{
     System::{
         DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData},
         LibraryLoader::GetModuleHandleW,
-        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalFree, GlobalLock, GlobalSize, GlobalUnlock},
+        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         Threading::GetCurrentProcessId,
     },
     UI::{
@@ -32,6 +32,11 @@ use windows_sys::Win32::{
 };
 
 use crate::ui::Workbench;
+use windows_sys::Win32::Graphics::Gdi::ValidateRect;
+
+fn missing_resource() -> windows::core::Error {
+    windows::core::Error::from(windows::core::HRESULT(0x80004005_u32 as i32))
+}
 
 const CF_UNICODETEXT: u32 = 13;
 
@@ -104,16 +109,16 @@ fn translate_key(vkey: u32) -> Option<Key> {
     None
 }
 
-unsafe extern "system" fn wndproc(hwnd: isize, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_ERASEBKGND => return 1,
         WM_PAINT => {
-            unsafe { ValidateRect(hwnd as HWND, ptr::null()); }
+            unsafe { ValidateRect(hwnd, ptr::null()); }
             mark_dirty(None);
             return 0;
         }
         WM_CLOSE => {
-            unsafe { ShowWindow(hwnd as HWND, SW_HIDE); }
+            unsafe { ShowWindow(hwnd, SW_HIDE); }
             INPUT.with(|cell| cell.borrow_mut().visible = false);
             return 0;
         }
@@ -141,9 +146,9 @@ unsafe extern "system" fn wndproc(hwnd: isize, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP => {
             let pressed = msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN;
             if pressed {
-                unsafe { SetFocus(hwnd as HWND); SetCapture(hwnd as HWND); }
+                // The child window receives normal Win32 mouse focus.
             } else {
-                unsafe { ReleaseCapture(); }
+                // No global/raw-input capture is installed.
             }
             let pos = pointer(lp);
             mark_dirty(Some(Event::PointerButton {
@@ -188,7 +193,7 @@ unsafe extern "system" fn wndproc(hwnd: isize, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         _ => {}
     }
-    unsafe { DefWindowProcW(hwnd as HWND, msg, wp, lp) }
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
 fn clipboard_write(owner: isize, value: &str) {
@@ -239,7 +244,7 @@ struct WindowSearch {
     largest: i64,
 }
 
-unsafe extern "system" fn enum_window(hwnd: HWND, user: LPARAM) -> BOOL {
+unsafe extern "system" fn enum_window(hwnd: HWND, user: LPARAM) -> i32 {
     let state = unsafe { &mut *(user as *mut WindowSearch) };
     if unsafe { IsWindowVisible(hwnd) } == 0 { return 1; }
     let mut pid = 0;
@@ -284,7 +289,7 @@ pub fn stop() {
         worker.running.store(false, Ordering::Release);
         let hwnd = worker.hwnd.load(Ordering::Acquire);
         if hwnd != 0 {
-            unsafe { PostMessageW(hwnd as HWND, WM_NULL, 0, 0); }
+            unsafe { PostMessageW(hwnd, WM_NULL, 0, 0); }
         }
         let _ = worker.thread.join();
     }
@@ -311,8 +316,8 @@ impl Graphics {
                 D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)
             )
         }?;
-        let device = device.ok_or_else(windows::core::Error::from_win32)?;
-        let context = context.ok_or_else(windows::core::Error::from_win32)?;
+        let device = device.ok_or_else(missing_resource)?;
+        let context = context.ok_or_else(missing_resource)?;
         let desc = DXGI_SWAP_CHAIN_DESC {
             BufferDesc: DXGI_MODE_DESC {
                 Width: width.max(1), Height: height.max(1),
@@ -328,7 +333,7 @@ impl Graphics {
         };
         let mut chain = None;
         unsafe { factory.CreateSwapChain(&device, &desc, &mut chain) }.ok()?;
-        let chain = chain.ok_or_else(windows::core::Error::from_win32)?;
+        let chain = chain.ok_or_else(missing_resource)?;
         let target = Some(Self::create_target(&device, &chain)?);
         let renderer = egui_directx11::Renderer::new(&device)?;
         Ok(Self { device, context, chain, target, renderer, size: (width, height) })
@@ -339,7 +344,7 @@ impl Graphics {
         let buffer = unsafe { chain.GetBuffer::<ID3D11Texture2D>(0) }?;
         let mut view = None;
         unsafe { device.CreateRenderTargetView(&buffer, None, Some(&mut view)) }?;
-        view.ok_or_else(windows::core::Error::from_win32)
+        view.ok_or_else(missing_resource)
     }
     fn resize(&mut self, width: u32, height: u32) -> windows::core::Result<()> {
         if width == 0 || height == 0 || self.size == (width, height) { return Ok(()); }
@@ -450,7 +455,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                             events,
                             ..Default::default()
                         };
-                        let output = ctx.run(input, |ctx| workbench.ui(ctx));
+                        let output = ctx.run_ui(input, |ui| workbench.ui(ui));
                         let (draw, platform, _) = egui_directx11::split_output(output);
                         for command in platform.commands {
                             if let egui::OutputCommand::CopyText(value) = command {

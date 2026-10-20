@@ -1,5 +1,5 @@
 use crate::signature::{Pattern, decode_hex};
-use egui::{CentralPanel, Color32, Context, RichText, ScrollArea, SidePanel, TextEdit, TopBottomPanel};
+use egui::{Color32, RichText, ScrollArea, TextEdit, Ui};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page { Home, Memory, Disasm, Pattern, Migration, Hooks, Settings }
@@ -40,60 +40,53 @@ impl Default for Workbench {
 }
 impl Workbench {
     pub fn ui(&mut self, ctx: &Context) {
-        ctx.set_visuals(egui::Visuals::dark());
-        TopBottomPanel::top("bloader_header").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading(RichText::new("BLoader DevTools").strong());
-                ui.separator();
-                ui.label(RichText::new("IN-PROCESS / D3D11").color(Color32::LIGHT_GREEN));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Hide (F8)").clicked() { self.hide_requested = true; }
-                    ui.label("BL ABI v1");
-                });
-            });
-        });
-        SidePanel::left("bloader_navigation").resizable(false).default_width(178.0).show(ctx, |ui| {
-            ui.add_space(10.0);
-            ui.label(RichText::new("DEVELOPER TOOLS").small().weak());
+        pub fn ui(&mut self, ui: &mut Ui) {
+        ui.ctx().set_visuals(egui::Visuals::dark());
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new("BLoader DevTools").strong());
             ui.separator();
-            for page in Page::ALL {
-                ui.add_space(4.0);
-                if ui.selectable_label(self.page == page, page.label()).clicked() {
-                    self.page = page;
-                }
-            }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.small("Game-owned child window");
-                ui.small("No external EXE / No Present hook");
-            });
+            ui.label(RichText::new("IN-PROCESS / D3D11").color(Color32::LIGHT_GREEN));
+            if ui.button("Hide (F8)").clicked() { self.hide_requested = true; }
         });
-        CentralPanel::default().show(ctx, |ui| {
-            ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.add_space(10.0);
-                match self.page {
-                    Page::Home => self.home(ui),
-                    Page::Memory => Self::unavailable(ui, "Memory scanner", "Read-only process memory enumeration and scan worker are not connected in this initial UI build."),
-                    Page::Disasm => Self::unavailable(ui, "Disassembly", "Instruction decoder and register snapshots are planned. No game code is patched."),
-                    Page::Pattern => self.pattern_panel(ui),
-                    Page::Migration => Self::unavailable(ui, "Version migration", "Cross-build function matching and verified feature manifests are not yet implemented."),
-                    Page::Hooks => Self::unavailable(ui, "Hook inspector", "Read-only integration with BLoader's hook registry is planned; this mod installs no hooks."),
-                    Page::Settings => self.settings(ui),
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(172.0);
+                ui.label(RichText::new("DEVELOPER TOOLS").small().weak());
+                for page in Page::ALL {
+                    if ui.selectable_label(self.page == page, page.label()).clicked() {
+                        self.page = page;
+                    }
                 }
-            });
-        });
-        TopBottomPanel::bottom("bloader_footer").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.small("BLoader DevTools v0.1.0");
                 ui.separator();
-                ui.small("Offline AOB validation available");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small("F8 : toggle panel");
+                ui.small("Game-owned child window");
+                ui.small("No external EXE");
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.add_space(10.0);
+                    match self.page {
+                        Page::Home => self.home(ui),
+                        Page::Memory => Self::unavailable(ui, "Memory scanner", "Read-only scanning is not connected in this initial UI build."),
+                        Page::Disasm => Self::unavailable(ui, "Disassembly", "Decoder and register snapshots are planned. No game code is patched."),
+                        Page::Pattern => self.pattern_panel(ui),
+                        Page::Migration => Self::unavailable(ui, "Version migration", "Cross-build function matching and feature manifests are not yet implemented."),
+                        Page::Hooks => Self::unavailable(ui, "Hook inspector", "BLoader hook registry integration is planned; this mod installs no hooks."),
+                        Page::Settings => self.settings(ui),
+                    }
                 });
             });
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.small("BLoader DevTools v0.1.0");
+            ui.separator();
+            ui.small("Offline AOB validation available · F8 toggle");
         });
     }
-    fn home(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Native Mod Development");
+      ui.heading("Native Mod Development");
         ui.label("Tools for inspecting, validating and migrating Bedrock native mod interfaces.");
         ui.add_space(16.0);
         ui.group(|ui| {
