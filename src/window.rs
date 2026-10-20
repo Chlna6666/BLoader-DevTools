@@ -459,7 +459,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     window_slot.store(hwnd as isize, Ordering::Release);
     info(format!("[BLoader DevTools] UI_WINDOW_CREATED mode={} hwnd=0x{:X}", if is_child { "child" } else { "top-level" }, hwnd as usize));
     // Explicitly show + paint immediately, not when F8 is pressed.
-    unsafe { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+    unsafe { ShowWindow(hwnd, SW_SHOW); }
     info("[BLoader DevTools] UI_WINDOW_SHOWN_BY_DEFAULT; hotkey is optional");
     let mut graphics_result = Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32);
     if is_child && graphics_result.is_err() {
@@ -478,7 +478,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         }
         is_child = false;
         window_slot.store(hwnd as isize, Ordering::Release);
-        unsafe { ShowWindow(hwnd, SW_SHOW); UpdateWindow(hwnd); }
+        unsafe { ShowWindow(hwnd, SW_SHOW); }
         graphics_result = Graphics::new(hwnd as isize, panel_width as u32, panel_height as u32);
     }
     let mut gfx = match graphics_result {
