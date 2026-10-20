@@ -35,6 +35,15 @@ pub fn parse(source:&str,allow_writes:bool)->Result<Vec<Command>,String>{
             ["next",f]=>Command::Refine(filter(f)?,"".into()),
             ["next","exact",value]=>Command::Refine(Filter::Exact,(*value).to_owned()),
             ["read",address,len]=>Command::Read(parse_address(address)?,len.parse().map_err(|_|"read 长度必须为整数")?),
+            ["assert",address,t,value]=>Command::Assert{
+                address:parse_address(address)?,
+                kind:kind(t)?,expected:(*value).into()
+            },
+            ["wait",time]=>{
+                let ms=time.parse::<u64>().map_err(|_|"wait 时间必须为毫秒整数")?;
+                if ms>2000{return Err(format!("第 {} 行 wait 最大允许 2000ms",line_index+1));}
+                Command::Wait(ms)
+            },
             ["disasm",address,count]=>Command::Disassemble(parse_address(address)?,count.parse().map_err(|_|"disasm 条数必须为整数")?),
             ["aob",bytes @ ..] if !bytes.is_empty()=>Command::Aob(bytes.join(" ")),
             ["write",address,t,old,new]=>{
@@ -54,6 +63,9 @@ pub const EXAMPLE:&str=r#"# BLoader DevTools 脚本示例
 scan f32 90
 next changed
 # disasm 0x7FF600001000 24
+# 在预期地址验证当前数值；失败会终止后续脚本
+# assert 0x7FF600001000 f32 90
+# wait 200
 # aob 48 8B ?? ?? 89
 # write 0x7FF600001000 f32 90 65
 "#;
@@ -65,4 +77,9 @@ mod tests{
         assert!(parse("write 0x100000 f32 90 70",true).is_ok());
     }
     #[test]fn script_parses(){assert_eq!(parse(EXAMPLE,false).unwrap().len(),2);}
+    #[test]fn script_assert_and_wait(){
+        let commands=parse("assert 0x20000 f32 90\nwait 100",false).unwrap();
+        assert_eq!(commands.len(),2);
+        assert!(parse("wait 3000",false).is_err());
+    }
 }

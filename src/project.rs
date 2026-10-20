@@ -17,7 +17,7 @@ fn replace_file_windows(temp:&std::path::Path,target:&std::path::Path)->Result<(
     }
     Ok(())
 }
-use crate::signature::Pattern;
+use crate::{signature::Pattern,memory::{ValueKind,parse_address}};
 const MAX_FILE:usize=160*1024*1024;
 fn root()->Result<PathBuf,String>{
     let base=std::env::var_os("LOCALAPPDATA").ok_or("无法找到 LOCALAPPDATA")?;
@@ -68,6 +68,45 @@ pub fn features()->Result<Vec<(String,String)>,String>{
         Some((v.get("feature")?.as_str()?.to_owned(),v.get("aob")?.as_str()?.to_owned()))
     ).collect())
 }
+
+fn parse_kind(raw:&str)->Option<ValueKind>{
+    ValueKind::ALL.into_iter().find(|kind|kind.label()==raw)
+}
+fn decode_watches(raw:&str)->Result<Vec<(usize,ValueKind)>,String>{
+    if raw.len()>32*1024{return Err("地址监视数据库超过 32 KiB".into());}
+    let source:Vec<Value>=serde_json::from_str(raw).map_err(|e|e.to_string())?;
+    let mut entries=Vec::new();
+    for item in source.into_iter().take(64) {
+        let (Some(address),Some(kind))=(item["address"].as_str(),item["kind"].as_str()) else {continue};
+        if let (Ok(address),Some(kind))=(parse_address(address),parse_kind(kind)){
+            if address>=0x10000 && !entries.iter().any(|(existing,_)|*existing==address){
+                entries.push((address,kind));
+            }
+        }
+    }
+    Ok(entries)
+}
+pub fn load_watches()->Result<Vec<(usize,ValueKind)>,String>{
+    let raw=match fs::read_to_string(root()?.join("watches.json")){
+        Ok(raw)=>raw,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(Vec::new()),
+        Err(e)=>return Err(e.to_string()),
+    };
+    decode_watches(&raw)
+}
+pub fn save_watches(entries:&[(usize,ValueKind)])->Result<String,String>{
+    if entries.len()>64{return Err("最多保存 64 项地址监视".into());}
+    let json=entries.iter().map(|(address,kind)|json!({
+        "address":format!("0x{address:X}"),
+        "kind":kind.label()
+    })).collect::<Vec<_>>();
+    let path=root()?.join("watches.json");
+    let tmp=root()?.join("watches.json.tmp");
+    fs::write(&tmp,serde_json::to_vec_pretty(&json).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    replace_file_windows(&tmp,&path)?;
+    Ok(path.display().to_string())
+}
+
 pub fn compare(old:&str,new:&str,aob:&str)->Result<Vec<String>,String>{
     let rule=Pattern::parse(aob).map_err(str::to_owned)?;
     let mut lines=Vec::new();
@@ -96,4 +135,9 @@ pub fn compare(old:&str,new:&str,aob:&str)->Result<Vec<String>,String>{
 mod tests{
     use super::*;
     #[test]fn manifest_rejects_invalid_pattern(){assert!(Pattern::parse("GG").is_err());}
+    #[test]fn watch_list_deduplicates_and_skips_bad_entries(){
+        let entries=decode_watches(r#"[{"address":"0x20000","kind":"Float"},{"address":"0x20000","kind":"Float"},{"address":"garbage","kind":"Double"}]"#).unwrap();
+        assert_eq!(entries.len(),1);
+        assert_eq!(entries[0].0,0x20000);
+    }
 }

@@ -136,6 +136,8 @@ pub enum Command {
     Compare{old:String,new:String,pattern:String},
     Reset,
     Watch(Vec<(usize,ValueKind)>),
+    Assert {address:usize,kind:ValueKind,expected:String},
+    Wait(u64),
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -146,10 +148,11 @@ pub struct Report {
     pub dump:Vec<u8>,
     pub dump_base:usize,
     pub watch_values:Vec<(usize,ValueKind,String)>,
+    pub ok:bool,
 }
 impl Report {
     fn new(title:&str,kind:ValueKind)->Self{
-        Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new()}
+        Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new(),ok:true}
     }
 }
 pub fn parse_address(raw:&str)->Result<usize,String>{
@@ -267,6 +270,33 @@ impl ScanState{
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::Assert{address,kind,expected}=>{
+                let mut r=Report::new("脚本断言",kind);
+                let outcome=kind.encode(&expected).and_then(|target|{
+                    let actual=read(address,kind.size())?;
+                    if target==actual {
+                        Ok(format!("PASS 0x{address:X}: {} = {}",kind.label(),expected))
+                    }else{
+                        Err(format!("FAIL 0x{address:X}: expected={expected}, actual={}",
+                            kind.display(&actual)))
+                    }
+                });
+                match outcome{
+                    Ok(message)=>r.lines.push(message),
+                    Err(message)=>{r.ok=false;r.lines.push(message);}
+                }
+                r
+            },
+            Command::Wait(ms)=>{
+                let mut r=Report::new("脚本等待",self.kind);
+                if ms>2000 {r.ok=false;r.lines.push("单次等待不能超过 2000ms".into());return r;}
+                let started=std::time::Instant::now();
+                while started.elapsed()<std::time::Duration::from_millis(ms) {
+                    if self.cancel.load(Ordering::Acquire){r.ok=false;r.lines.push("等待已取消".into());return r;}
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                r.lines.push(format!("等待 {} ms 完成",ms));r
+            },
             Command::Watch(entries)=>{
                 let mut r=Report::new("地址监视刷新",self.kind);
                 for (address,kind) in entries.into_iter().take(64) {
@@ -297,6 +327,12 @@ impl ScanState {
                     let report=self.execute(command);
                     combined.lines.push(format!("--- #{:02} {} ---",index+1,report.title));
                     combined.lines.extend(report.lines);
+                    let failed=!report.ok;
+                    if failed {
+                        combined.ok=false;
+                        combined.lines.push("脚本遇到断言或执行错误，已停止后续命令".into());
+                        break;
+                    }
                     if matches!(report.title.as_str(), "首次精确扫描"|"再次扫描"|"游戏内特征扫描"|"已重置扫描"){
                         combined.hits=report.hits;
                         combined.kind=report.kind;
@@ -311,7 +347,7 @@ impl ScanState {
                 r.dump_base=address;
                 match read(address,len.min(4096)){
                     Ok(data)=>{r.dump=data;r.lines.push(format!("已读取 {} 字节",r.dump.len()))}
-                    Err(e)=>r.lines.push(e)
+                    Err(e)=>{r.ok=false;r.lines.push(e);}
                 };r
             }
             Command::Disassemble(address,count)=>{
@@ -336,7 +372,8 @@ impl ScanState {
                 let mut r=Report::new("手动数值写入",kind);
                 let outcome=kind.encode(&old).and_then(|old|kind.encode(&new)
                     .and_then(|new|write_data(address,&old,&new)));
-                r.lines.push(match outcome{Ok(())=>format!("已更新 0x{address:X}；请验证游戏实际效果"),Err(e)=>format!("拒绝写入：{e}")});
+                r.lines.push(match outcome{Ok(())=>format!("已更新 0x{address:X}；请验证游戏实际效果"),
+                    Err(e)=>{r.ok=false;format!("拒绝写入：{e}")}});
                 r
             }
             Command::Scan(kind,text)=>self.execute(Command::ScanRange(kind,text,ScanOptions::default())),

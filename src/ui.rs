@@ -138,7 +138,10 @@ impl Default for Workbench{
             dark:true,left_width:178.,right_width:215.,bottom_height:142.,
             selected_hit:None,hit_page:0,scan_scope:ScanScope::Writable,
             scan_budget:128,start_addr:"0x10000".into(),end_addr:"最大地址".into(),
-            watches:Vec::new(),watch_due:Instant::now(),
+            watches:crate::project::load_watches().unwrap_or_default().into_iter()
+                .map(|(address,kind)|Watch{address,kind,value:"等待刷新".into()})
+                .collect(),
+            watch_due:Instant::now(),
             show_explorer:true,show_inspector:true,show_console:true,
         }
     }
@@ -185,10 +188,17 @@ impl Workbench{
         }else{memory::parse_address(&self.end_addr)?};
         ScanOptions{start,end,scope:self.scan_scope,budget_mib:self.scan_budget}.validate()
     }
+    fn save_watch_list(&mut self){
+        let entries=self.watches.iter().map(|w|(w.address,w.kind)).collect::<Vec<_>>();
+        if let Err(e)=crate::project::save_watches(&entries){
+            self.log(format!("监视表保存失败：{e}"));
+        }
+    }
     fn add_watch(&mut self,address:usize){
         if self.watches.iter().any(|x|x.address==address){self.log("地址已在监视列表");return;}
         if self.watches.len()>=64{self.log("最多监视 64 个地址");return;}
         self.watches.push(Watch{address,kind:self.value_kind,value:"等待刷新".into()});
+        self.save_watch_list();
         self.watch_due=Instant::now()-Duration::from_secs(1);
     }
     fn poll(&mut self){
@@ -519,7 +529,7 @@ impl Workbench{
     }
     fn script_editor(&mut self,ui:&mut Ui){
         ui.heading("脚本实验室");
-        ui.label(RichText::new("CE 风格研究脚本（安全 DSL）。支持 scan / next / read / disasm / aob / write / reset，不执行任意汇编。").color(self.muted()).small());
+        ui.label(RichText::new("CE 风格研究脚本（安全 DSL）。支持 scan / next / read / disasm / aob / assert / wait / write / reset；assert 失败会中止后续操作。").color(self.muted()).small());
         ui.add(TextEdit::multiline(&mut self.script).code_editor().desired_rows(12).desired_width(f32::INFINITY));
         ui.horizontal(|ui|{
             if ui.button("检查脚本语法").clicked(){
@@ -592,6 +602,8 @@ impl Workbench{
         });
         ui.label("底部控制台高度");ui.add(egui::Slider::new(&mut self.bottom_height,100. ..= 340.));
         ui.label("核心：Rust + egui + DX11 · 所有调试功能在 DevTools DLL 内");
+        ui.label("快捷键：Ctrl+1…8 切换工作台标签");
+        ui.label("监视表：保存于 %LOCALAPPDATA%/BLoader-DevTools/watches.json");
         ui.label("BLoader 只负责加载、生命周期以及宿主日志；不提供扫描、脚本和 Hook 解析。");
         ui.label("作者：Chlna6666 · GPL-3.0-only");
         ui.hyperlink_to(REPO,REPO);
@@ -660,8 +672,12 @@ impl Workbench{
                     if ui.small_button("×").clicked(){remove=Some(i);}
                 });
             }
-            if let Some(i)=remove{self.watches.remove(i);}
+            if let Some(i)=remove{
+                self.watches.remove(i);
+                self.save_watch_list();
+            }
             ui.separator();
+            ui.label(RichText::new("地址监视每 700ms 后台刷新并自动保存。").small().color(self.muted()));
             ui.label(RichText::new("只改写已可写的数据页；若旧值变化将拒绝写入。").small().color(self.muted()));
             if let Some(i)=self.selected_hit {
                 if let Some(hit)=self.hits.get(i){
