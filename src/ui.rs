@@ -2,7 +2,7 @@
 //! All memory access, disassembly and script execution live inside DevTools,
 //! never in BLoader and never on the game/render thread.
 use crate::{
-    memory::{self,Command,Engine,Filter,Hit,Report,ValueKind},
+    memory::{self,Command,Engine,Filter,Hit,ValueKind},
     signature::{Pattern,decode_hex},
 };
 use egui::{Align,Color32,FontFamily,FontId,Frame,Layout,RichText,ScrollArea,Stroke,TextEdit,Ui,Vec2};
@@ -165,8 +165,8 @@ impl Workbench{
         let width=viewport.x.max(320.);
         let height=viewport.y.max(320.);
         let left=self.left_width.min((width*0.30).max(130.));
-        let right=if width>900.{self.right_width.min(width*.24)}else{0.};
-        let bottom=self.bottom_height.min(height*.32);
+        let right=if width>900.{self.right_width.min(width*0.24)}else{0.};
+        let bottom=self.bottom_height.min(height*0.32);
         // Primary toolbar / breadcrumb.
         ui.allocate_ui_with_layout(Vec2::new(width,43.),Layout::left_to_right(Align::Center),|ui|{
             ui.add_space(12.);

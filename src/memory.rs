@@ -173,8 +173,8 @@ impl Engine {
     pub fn submit(&mut self, cmd:Command)->Result<(),String>{
         if self.busy {return Err("后台任务尚未完成".into());}
         self.tx.as_ref().ok_or("扫描线程无法启动")?.try_send(cmd).map_err(|e|match e {
-            TrySendError::Full(_)=>"扫描队列已满".into(),
-            TrySendError::Disconnected(_)=>"扫描线程已停止".into()
+            TrySendError::Full(_)=>"扫描队列已满".to_owned(),
+            TrySendError::Disconnected(_)=>"扫描线程已停止".to_owned()
         })?;
         self.busy=true;Ok(())
     }
@@ -338,4 +338,8 @@ mod tests{
     use super::*;
     #[test]fn parse_addresses(){assert_eq!(parse_address("0xAB_CD").unwrap(),0xABCD);}
     #[test]fn values(){assert_eq!(ValueKind::F32.encode("1.5").unwrap(),1.5f32.to_le_bytes());}
+}
+
+pub fn hex_bytes(data:&[u8])->String {
+    data.iter().map(|byte|format!("{byte:02X}")).collect::<Vec<_>>().join(" ")
 }
