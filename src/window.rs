@@ -492,6 +492,11 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     info(format!("[BLoader DevTools] UI_MODE_READY mode={}", if is_child { "game-child" } else { "same-process-top-level" }));
     info("[BLoader DevTools] D3D11_DEVICE_READY; initializing egui frame");
     let ctx = Context::default();
+    crate::ui::configure_appearance(&ctx, true);
+    match crate::ui::install_system_fonts(&ctx) {
+        Ok(path) => info(format!("[BLoader DevTools] SYSTEM_CJK_FONT_LOADED: {path}")),
+        Err(err) => warn(format!("[BLoader DevTools] CHINESE_FONT_UNAVAILABLE: {err}")),
+    }
     let mut first_frame_logged = false;
     let mut workbench = Workbench::default();
     let mut was_f8_down = false;
