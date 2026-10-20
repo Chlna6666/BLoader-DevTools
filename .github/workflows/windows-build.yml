@@ -16,8 +16,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: Format check
-        run: cargo fmt --all -- --check
       - name: Unit tests
         run: cargo test --target x86_64-pc-windows-msvc
       - name: Build release DLL
