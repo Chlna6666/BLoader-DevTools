@@ -15,6 +15,7 @@ struct BlStringView {
     len: usize,
 }
 unsafe impl Sync for BlStringView {}
+unsafe impl Send for BlStringView {}
 
 #[repr(C)]
 struct BlHostPrefix {
@@ -32,6 +33,7 @@ struct BlModApiV1 {
     on_unload: Option<unsafe extern "system" fn()>,
 }
 unsafe impl Sync for BlModApiV1 {}
+unsafe impl Send for BlModApiV1 {}
 
 static ID: &[u8] = b"bloader.devtools";
 static NAME: &[u8] = b"BLoader DevTools";
