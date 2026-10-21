@@ -645,6 +645,20 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     let _=reply.send(result);
                     mark_dirty(None);
                 }
+                crate::mcp::UiCommand::CollisionScan(profile,budget,reply)=>{
+                    let result=workbench.scan_collision_for_ai(profile,budget);
+                    let _=reply.send(result);
+                    mark_dirty(None);
+                }
+                crate::mcp::UiCommand::CollisionRefine(motion,reply)=>{
+                    let result=workbench.refine_collision_for_ai(motion);
+                    let _=reply.send(result);
+                    mark_dirty(None);
+                }
+                crate::mcp::UiCommand::CollisionResults(limit,reply)=>{
+                    let result=workbench.collision_results_for_ai(limit);
+                    let _=reply.send(result);
+                }
             }
         }
 

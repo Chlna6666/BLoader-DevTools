@@ -287,6 +287,52 @@ impl Workbench{
             feet_hint,radius:self.collision_radius,
         }.validate()
     }
+    /// Used by explicitly enabled localhost MCP, dispatched on DevTools UI
+    /// thread; the actual memory scan still runs on Engine's worker thread.
+    pub fn scan_collision_for_ai(&mut self,profile:collision::Profile,budget:usize)
+        ->Result<String,String>{
+        let profile=profile.validate()?;
+        let mut options=self.scan_options()?;
+        options.scope=ScanScope::Writable;
+        options.budget_mib=budget;
+        let options=options.validate()?;
+        self.engine.submit(Command::ScanPlayerAabb{profile,options})?;
+        self.collision_width=profile.width;
+        self.collision_height=profile.height;
+        self.collision_tolerance=profile.tolerance;
+        self.collision_use_coords=profile.feet_hint.is_some();
+        if let Some(p)=profile.feet_hint{
+            self.collision_coords=[p.x.to_string(),p.y.to_string(),p.z.to_string()];
+        }
+        self.collision_radius=profile.radius;
+        self.scan_budget=budget;
+        self.tab=Tab::LocalPlayer;
+        self.log("AI 已提交碰撞箱后台扫描；使用碰撞箱结果工具轮询完成状态");
+        Ok("任务已提交，请轮询 devtools_collision_results 等待 busy=false".into())
+    }
+    pub fn refine_collision_for_ai(&mut self,motion:Motion)->Result<String,String>{
+        if self.collision_hits.is_empty(){
+            return Err("还没有碰撞箱候选，请先扫描并等待完成".into());
+        }
+        let mut profile=self.collision_profile()?;
+        profile.feet_hint=None;
+        self.engine.submit(Command::RefinePlayerAabb{profile,motion})?;
+        self.collision_motion=motion;
+        self.tab=Tab::LocalPlayer;
+        Ok(format!("已提交碰撞箱{}筛选；等待完成后读取结果",motion.label()))
+    }
+    pub fn collision_results_for_ai(&mut self,count:usize)->String {
+        // poll now, as the user might query from MCP without an active
+        // continuous repaint trigger.
+        self.poll();
+        let mut text=format!("busy={} candidates={}; AABB 地址不是 Actor*/LocalPlayer*\\n",
+            self.engine.busy,self.collision_hits.len());
+        for hit in self.collision_hits.iter().take(count.clamp(1,50)){
+            text.push_str(&collision::describe(hit));
+            text.push('\n');
+        }
+        text
+    }
     pub fn needs_poll(&self)->bool{self.engine.busy || (!self.watches.is_empty() && self.watch_due.elapsed()>=Duration::from_millis(700))}
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
     fn panel(&self)->Color32{if self.dark{PANEL}else{Color32::WHITE}}

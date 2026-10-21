@@ -37,6 +37,9 @@ pub(crate) enum UiCommand {
     Capture(SyncSender<Result<Vec<u8>, String>>),
     QueryState(SyncSender<String>),
     Navigate(String,SyncSender<Result<String,String>>),
+    CollisionScan(crate::collision::Profile,usize,SyncSender<Result<String,String>>),
+    CollisionRefine(crate::collision::Motion,SyncSender<Result<String,String>>),
+    CollisionResults(usize,SyncSender<String>),
 }
 static UI_COMMANDS: Mutex<VecDeque<UiCommand>> = Mutex::new(VecDeque::new());
 
@@ -58,7 +61,7 @@ fn capture_devtools_gpu() -> Result<Vec<u8>, String> {
     ui_request(UiCommand::Capture)?
 }
 const MAX_REQUEST_BYTES: usize = 65536;
-const MAX_IMAGE_PIXELS: usize = 1920 * 1080;
+
 
 pub fn status() -> Option<(String, String)> {
     SERVER.lock().ok()?.as_ref().map(|s| (s.endpoint.clone(), s.token.clone()))
@@ -216,14 +219,39 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
                 "inputSchema":{"type":"object","properties":{"tab":{"type":"string"}},"required":["tab"]}
             },
             {
+                "name":"devtools_collision_scan",
+                "description":"后台扫描进程内玩家尺寸 AABB (6 f32)，可指定宽高、容差、内存预算和可选玩家脚底 XYZ。返回任务已提交，不保证识别 LocalPlayer。",
+                "inputSchema":{"type":"object","properties":{
+                    "width":{"type":"number"},"height":{"type":"number"},
+                    "tolerance":{"type":"number"},"budget_mib":{"type":"integer","minimum":16,"maximum":1024},
+                    "x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},
+                    "radius":{"type":"number"}
+                }}
+            },
+            {
+                "name":"devtools_collision_refine",
+                "description":"游戏中移动或跳跃后，重新比较上次碰撞箱坐标。motion: moved/horizontal/jumped/stationary",
+                "inputSchema":{"type":"object","properties":{
+                    "motion":{"type":"string","enum":["moved","horizontal","jumped","stationary"]}
+                },"required":["motion"]}
+            },
+            {
+                "name":"devtools_collision_results",
+                "description":"返回后台扫描是否结束、最多 50 个 AABB 候选地址、尺寸与位置，不代表本地玩家归属。",
+                "inputSchema":{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":50}}}
+            },
+            {
                 "name":"window_info",
                 "description":"查询 DevTools 或 Minecraft 当前窗口尺寸、可见性和句柄（不执行点击）",
                 "inputSchema":{"type":"object","properties":{"target":{"type":"string","enum":["devtools","game"]}},"required":["target"]}
             },
             {
                 "name":"capture_window",
-                "description":"截取窗口 PNG：DevTools 使用原生 D3D11 GPU 读回，游戏窗口使用实验性 GDI PrintWindow（遇到黑屏则报告失败）。",
-                "inputSchema":{"type":"object","properties":{"target":{"type":"string","enum":["devtools","game"]}},"required":["target"]}
+                "description":"DevTools 使用 D3D11 GPU 读回，游戏前台使用桌面合成截图、否则实验性 PrintWindow。模式可选择 auto/desktop/printwindow；输出尺寸可能缩放。",
+                "inputSchema":{"type":"object","properties":{
+                    "target":{"type":"string","enum":["devtools","game"]},
+                    "mode":{"type":"string","enum":["auto","desktop","printwindow"]}
+                },"required":["target"]}
             },
             {
                 "name":"click_window",
@@ -264,8 +292,8 @@ fn rect(hwnd: HWND) -> Result<(u32,u32),String> {
     }
     let w = (r.right-r.left).max(0) as u32;
     let h = (r.bottom-r.top).max(0) as u32;
-    if w == 0 || h == 0 || (w as usize)*(h as usize) > MAX_IMAGE_PIXELS {
-        return Err("窗口尺寸为空或超过 1920x1080 截图上限".into());
+    if w == 0 || h == 0 || w>16384 || h>16384 {
+        return Err("窗口客户区尺寸无效".into());
     }
     Ok((w,h))
 }
@@ -318,6 +346,44 @@ fn call_tool(request:&Value) -> Value {
             if tab.len()>32{return Err("标签名称过长".into());}
             let result=ui_request(|reply|UiCommand::Navigate(tab.to_owned(),reply))??;
             return Ok(json!({"content":[{"type":"text","text":result}]}));
+        }
+        if name=="devtools_collision_scan" {
+            let mut profile=crate::collision::Profile::default();
+            if let Some(n)=args["width"].as_f64(){profile.width=n as f32;}
+            if let Some(n)=args["height"].as_f64(){profile.height=n as f32;}
+            if let Some(n)=args["tolerance"].as_f64(){profile.tolerance=n as f32;}
+            if let Some(n)=args["radius"].as_f64(){profile.radius=n as f32;}
+            let coords=[args["x"].as_f64(),args["y"].as_f64(),args["z"].as_f64()];
+            if coords.iter().any(Option::is_some){
+                let (Some(x),Some(y),Some(z))=(coords[0],coords[1],coords[2]) else {
+                    return Err("世界坐标必须同时提供 x/y/z".into());
+                };
+                profile.feet_hint=Some(crate::collision::Vec3{
+                    x:x as f32,y:y as f32,z:z as f32
+                });
+            }
+            let profile=profile.validate()?;
+            let budget=args["budget_mib"].as_u64().unwrap_or(256);
+            if !(16..=1024).contains(&budget){return Err("扫描预算应在16–1024 MiB之间".into());}
+            let res=ui_request(|reply|UiCommand::CollisionScan(profile,budget as usize,reply))??;
+            return Ok(json!({"content":[{"type":"text","text":res}]}));
+        }
+        if name=="devtools_collision_refine" {
+            let motion=match args["motion"].as_str().unwrap_or("") {
+                "moved"=>crate::collision::Motion::Moved,
+                "horizontal"=>crate::collision::Motion::Horizontal,
+                "jumped"=>crate::collision::Motion::Jumped,
+                "stationary"=>crate::collision::Motion::Stationary,
+                _=>return Err("不支持的 motion".into())
+            };
+            let res=ui_request(|reply|UiCommand::CollisionRefine(motion,reply))??;
+            return Ok(json!({"content":[{"type":"text","text":res}]}));
+        }
+        if name=="devtools_collision_results" {
+            let limit=args["limit"].as_u64().unwrap_or(15);
+            if !(1..=50).contains(&limit){return Err("limit 应为 1–50".into());}
+            let res=ui_request(|reply|UiCommand::CollisionResults(limit as usize,reply))?;
+            return Ok(json!({"content":[{"type":"text","text":res}]}));
         }
         let target = args["target"].as_str().ok_or("缺少 target 参数")?;
         let hwnd = target_hwnd(target)?;

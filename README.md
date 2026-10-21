@@ -71,6 +71,13 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 
 「本地玩家定位」页面新增**无需 ClientInstance 地址的几何特征初筛**：假设 AABB 按 6 个连续 float32 存储，顺序为 min(x,y,z)、max(x,y,z)，站立玩家默认宽/高/深 = 0.6 / 1.8 / 0.6（具体版本、姿态或内部布局可以不同）。支持自定义宽度、高度、容差，以及可选的游戏世界坐标 X/Y/Z（以脚底为 Y）和距离半径。
 
+
+
+本机 MCP AI 测试工具（需要在设置中主动开启 MCP）：
+- `devtools_collision_scan`：指定宽、高、容差、可选 x/y/z 脚底位置与 radius，以及扫描预算 budget_mib；仅提交后台扫描任务。
+- `devtools_collision_results`：轮询 busy 状态和最多 50 条候选 AABB 的中心坐标、地址与样本数量。
+- `devtools_collision_refine(motion="horizontal")`：本人在游戏里完成走动/跳跃后，按旧、新 AABB 位置变化筛选候选；motion 可选 horizontal、jumped、moved、stationary。
+
 首次扫描在 DevTools 专用后台线程中优先搜索私有可写内存区域；按照「内存扫描」设置的地址范围和 MiB 预算分段抽样。默认预算通常无法覆盖整个游戏堆，未命中时应按实际内存分布调整预算/范围；游戏不会为查找自动停止渲染。
 
 候选筛选：首先静止时扫描；再在世界里走几步，按「水平走动」筛选变化了的 3D AABB；再在跳跃途中、*落地前* 按「跳跃/垂直移动」进一步筛选。每轮对同一内存地址再次读取 24 字节，记录中心位置、采样次数和移动累计距离。可以分页、复制 AABB 数据地址、打开十六进制查看，还可显示 AABB 线框的示意投影。
@@ -92,7 +99,7 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 
 **IDE 面板**：拖拽左右两条分隔线可调整项目栏和地址检查器宽度；拖拽编辑区与底部控制台之间的水平分隔线可调整控制台高度。顶部「视图」菜单控制面板显隐和重置默认布局；尺寸与显隐状态保存于 %LOCALAPPDATA%\BLoader-DevTools\layout.json，下次启动恢复。窄窗口下检查器采用浮动窗口。该布局还不是 IntelliJ 那种任意停靠树和标签拆分。
 
-**游戏画面 MCP 截图**：\`capture_window(target="game",mode="auto")\` 在 Minecraft 处于前台且可见时先尝试捕获 Windows *桌面合成后的客户区画面*；不可用时退回实验性 \`PrintWindow\`。可用 \`mode="desktop"\` 或 \`mode="printwindow"\` 强制对比方法。对于 4K 等高分辨率游戏窗口，桌面合成截图会按像素预算缩小 PNG，但 \`window_info\` 和 \`click_window\` 不再因窗口超过 1920×1080 而被拒绝。返回文本会分别标注原客户区分辨率与输出 PNG 分辨率，点击依然使用**原始游戏客户区坐标**。
+**游戏画面 MCP 截图**：`capture_window(target="game",mode="auto")` 在 Minecraft 处于前台且可见时先尝试捕获 Windows *桌面合成后的客户区画面*；不可用时退回实验性 `PrintWindow`。可用 `mode="desktop"` 或 `mode="printwindow"` 强制对比方法。对于 4K 等高分辨率游戏窗口，桌面合成截图会按像素预算缩小 PNG，但 `window_info` 和 `click_window` 不再因窗口超过 1920×1080 而被拒绝。返回文本会分别标注原客户区分辨率与输出 PNG 分辨率，点击依然使用**原始游戏客户区坐标**。
 
 桌面合成画面**不是游戏 RenderDragon 内部 Backbuffer**；前台窗口被遮挡、特殊全屏、远程串流仅捕获游戏画面、桌面 DPI 配置等情况下，图片可能不完整甚至失败。真正的 Windows Graphics Capture / DXGI 纹理安全读回仍是后续任务，不将这一回退称为完整游戏 GPU 截图。
 
