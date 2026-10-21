@@ -4,6 +4,7 @@
 use crate::{
     memory::{self,Command,Engine,Filter,Hit,ValueKind,ScanScope,ScanOptions},
     local_player::{self,Candidate,PlayerAccess,SourceKind},
+    collision::{self,Motion},
     signature::{Pattern,decode_hex},
 };
 use egui::{Align,Color32,FontFamily,FontId,Frame,Layout,RichText,ScrollArea,Stroke,TextEdit,Ui,Vec2};
@@ -118,6 +119,30 @@ fn drag_console_split(ui:&mut Ui,width:f32,height:&mut f32)->bool{
     false
 }
 
+
+/// Isometric wireframe preview of the measured bounding volume, not a
+/// Minecraft RenderDragon model or verified Actor geometry.
+fn draw_hitbox(ui:&mut Ui,box3:collision::Aabb){
+    let (rect,_)=ui.allocate_exact_size(Vec2::new(235.,166.),egui::Sense::hover());
+    let d=box3.extent();
+    let center=rect.center();
+    let scale=52.0/d.x.max(d.y).max(d.z).max(1.);
+    let points=(0..8).map(|i|{
+        let x=if i&1==0{-d.x/2.}else{d.x/2.};
+        let y=if i&2==0{-d.y/2.}else{d.y/2.};
+        let z=if i&4==0{-d.z/2.}else{d.z/2.};
+        egui::pos2(center.x+(x-z)*0.85*scale,
+            center.y+((x+z)*0.36-y)*scale)
+    }).collect::<Vec<_>>();
+    for i in 0..8 {
+        for bit in [1usize,2,4] {
+            if i&bit==0 {
+                ui.painter().line_segment([points[i],points[i|bit]],Stroke::new(1.8,ACCENT));
+            }
+        }
+    }
+}
+
 pub struct Workbench {
     tab:Tab,
     pub hide_requested:bool,
@@ -168,6 +193,16 @@ pub struct Workbench {
     player_lines:Vec<String>,
     player_index_hit:Option<usize>,
     player_profiles:Vec<String>,
+    collision_hits:Vec<collision::Hit>,
+    collision_width:f32,
+    collision_height:f32,
+    collision_tolerance:f32,
+    collision_use_coords:bool,
+    collision_coords:[String;3],
+    collision_radius:f32,
+    collision_motion:Motion,
+    collision_selected:Option<usize>,
+    collision_page:usize,
 }
 impl Default for Workbench{
     fn default()->Self{
@@ -204,6 +239,16 @@ impl Default for Workbench{
             player_lines:Vec::new(),
             player_index_hit:None,
             player_profiles:crate::project::local_player_recipes().unwrap_or_default(),
+            collision_hits:Vec::new(),
+            collision_width:0.6,
+            collision_height:1.8,
+            collision_tolerance:0.035,
+            collision_use_coords:false,
+            collision_coords:["0".into(),"64".into(),"0".into()],
+            collision_radius:4.0,
+            collision_motion:Motion::Horizontal,
+            collision_selected:None,
+            collision_page:0,
         }
     }
 }
@@ -228,6 +273,19 @@ impl Workbench{
         format!("tool={} busy={} candidates={} watches={} explorer={} inspector={} console={} recent_logs={:?}",
             self.tab.name(),self.engine.busy,self.hits.len(),self.watches.len(),
             self.show_explorer,self.show_inspector,self.show_console,recent)
+    }
+    fn collision_profile(&self)->Result<collision::Profile,String>{
+        let feet_hint=if self.collision_use_coords{
+            let v=self.collision_coords.iter().map(|text|
+                text.trim().parse::<f32>().map_err(|_|"坐标必须是数字".to_owned())
+            ).collect::<Result<Vec<_>,_>>()?;
+            Some(collision::Vec3{x:v[0],y:v[1],z:v[2]})
+        }else{None};
+        collision::Profile{
+            width:self.collision_width,height:self.collision_height,
+            tolerance:self.collision_tolerance,
+            feet_hint,radius:self.collision_radius,
+        }.validate()
     }
     pub fn needs_poll(&self)->bool{self.engine.busy || (!self.watches.is_empty() && self.watch_due.elapsed()>=Duration::from_millis(700))}
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
@@ -289,6 +347,13 @@ impl Workbench{
                 for line in &report.lines {self.log(line.clone());}
             }
             match report.title.as_str(){
+                "玩家碰撞箱首次扫描"|"玩家碰撞箱动态筛选"=>{
+                    if let Some(items)=report.player_hitboxes {
+                        self.collision_hits=items;
+                        self.collision_selected=None;
+                        self.collision_page=0;
+                    }
+                },
                 "本地玩家候选检查"=>{
                     self.player_lines=report.lines.clone();
                     self.player_candidate=report.player_candidate.clone();
@@ -501,6 +566,111 @@ impl Workbench{
         ui.heading("本地玩家 / LocalPlayer 定位向导");
         ui.label(RichText::new("开发常用路径：ClientInstance → getLocalPlayer() → LocalPlayer。此页只读，不调用未验证的游戏虚函数。")
             .color(self.muted()).small());
+        ui.add_space(8.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.heading("快速查找 · 玩家 3D 碰撞箱");
+            ui.label(RichText::new("默认按站立玩家 0.6 × 1.8 × 0.6 的 AABB 几何结构搜索；如潜行、游泳、版本变更，可调整宽高。")
+                .small().color(self.muted()));
+            ui.horizontal_wrapped(|ui|{
+                ui.label("宽度");
+                ui.add(egui::DragValue::new(&mut self.collision_width).speed(0.01).range(0.1..=5.));
+                ui.label("高度");
+                ui.add(egui::DragValue::new(&mut self.collision_height).speed(0.01).range(0.2..=5.));
+                ui.label("容差");
+                ui.add(egui::DragValue::new(&mut self.collision_tolerance).speed(0.002).range(0.001..=0.25));
+            });
+            ui.horizontal_wrapped(|ui|{
+                ui.checkbox(&mut self.collision_use_coords,"利用已知世界坐标（脚底位置）加速筛选");
+                if self.collision_use_coords {
+                    for (i,name) in ["X","Y","Z"].iter().enumerate(){
+                        ui.label(*name);
+                        ui.add(TextEdit::singleline(&mut self.collision_coords[i]).desired_width(75.));
+                    }
+                    ui.label("半径");
+                    ui.add(egui::DragValue::new(&mut self.collision_radius).speed(0.5).range(0.25..=5000.));
+                }
+            });
+            ui.horizontal_wrapped(|ui|{
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("开始碰撞箱快速扫描")).clicked(){
+                    match (self.collision_profile(),self.scan_options()){
+                        (Ok(profile),Ok(mut options))=>{
+                            options.scope=ScanScope::Writable;
+                            self.job(Command::ScanPlayerAabb{profile,options});
+                        }
+                        (Err(e),_)|(_,Err(e))=>self.log(format!("扫描参数无效：{e}")),
+                    }
+                }
+                egui::ComboBox::from_id_salt("collision-motion")
+                    .selected_text(self.collision_motion.label()).show_ui(ui,|ui|{
+                    for kind in Motion::ALL{
+                        ui.selectable_value(&mut self.collision_motion,kind,kind.label());
+                    }
+                });
+                if ui.add_enabled(!self.engine.busy && !self.collision_hits.is_empty(),
+                    egui::Button::new("动作后筛选")).clicked(){
+                    match self.collision_profile(){
+                        Ok(mut profile)=>{
+                            // During movement, coordinates differ from the initial hint.
+                            // Refine on shape & motion, not on stale absolute XYZ.
+                            profile.feet_hint=None;
+                            self.job(Command::RefinePlayerAabb{
+                                profile,motion:self.collision_motion
+                            });
+                        }
+                        Err(e)=>self.log(format!("碰撞参数错误：{e}"))
+                    }
+                }
+            });
+            ui.label(RichText::new("建议流程：入世界静止时首次扫描 → 走几步后水平筛选 → 再跳跃筛选。动态筛选应在动作完成后点击，不能在同一帧循环扫描。")
+                .small().color(self.muted()));
+            ui.label(RichText::new(format!("候选数：{}；扫描预算由「内存扫描」的 MiB 和起止地址控制。",self.collision_hits.len()))
+                .strong());
+            if !self.collision_hits.is_empty(){
+                let max_pages=self.collision_hits.len().div_ceil(30).max(1);
+                self.collision_page=self.collision_page.min(max_pages-1);
+                ui.horizontal(|ui|{
+                    if ui.add_enabled(self.collision_page>0,egui::Button::new("上一页")).clicked(){self.collision_page-=1;}
+                    ui.label(format!("{}/{}",self.collision_page+1,max_pages));
+                    if ui.add_enabled(self.collision_page+1<max_pages,egui::Button::new("下一页")).clicked(){self.collision_page+=1;}
+                });
+                let start=self.collision_page*30;
+                egui::Grid::new("collision-candidates").striped(true).show(ui,|ui|{
+                    ui.strong("AABB 内存地址");ui.strong("中心坐标");ui.strong("采样");ui.end_row();
+                    for i in start..(start+30).min(self.collision_hits.len()){
+                        let item=&self.collision_hits[i];
+                        let center=item.box3.center();
+                        if ui.selectable_label(self.collision_selected==Some(i),
+                            format!("0x{:X}",item.address)).clicked(){
+                            self.collision_selected=Some(i);
+                        }
+                        ui.monospace(format!("{:.1}, {:.1}, {:.1}",center.x,center.y,center.z));
+                        ui.label(item.samples.to_string());
+                        ui.end_row();
+                    }
+                });
+                if let Some(index)=self.collision_selected {
+                    if let Some(item)=self.collision_hits.get(index){
+                        ui.separator();
+                        ui.strong("候选碰撞箱 3D 线框（示意投影）");
+                        draw_hitbox(ui,item.box3);
+                        ui.label(collision::describe(item));
+                        let address=item.address;
+                        ui.horizontal(|ui|{
+                            if ui.button("复制 AABB 地址").clicked(){
+                                ui.ctx().copy_text(format!("0x{address:X}"));
+                            }
+                            if ui.button("转到十六进制").clicked(){
+                                self.address=format!("0x{address:X}");
+                                self.tab=Tab::Hex;
+                                self.job(Command::Read(address,128));
+                            }
+                        });
+                    }
+                }
+            }
+            ui.label(RichText::new("重要：AABB 数据地址 ≠ Actor* ≠ LocalPlayer*。同尺寸实体、玩家影子对象和缓存都可能命中；需进一步验证实例归属及生命周期。")
+                .color(self.muted()).small());
+        });
         ui.add_space(8.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
             ui.strong("第 1 步 · 定位 getLocalPlayer 虚表索引");

@@ -7,7 +7,7 @@ use std::{
 };
 use windows_sys::Win32::System::{
     Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory},
-    Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
+    Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_GUARD, PAGE_NOACCESS,
         PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, PAGE_EXECUTE_READ,
         PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY},
     Threading::GetCurrentProcess,
@@ -144,6 +144,8 @@ pub enum Command {
         access:crate::local_player::PlayerAccess,
     },
     FindLocalPlayerIndex,
+    ScanPlayerAabb {profile:crate::collision::Profile,options:ScanOptions},
+    RefinePlayerAabb {profile:crate::collision::Profile,motion:crate::collision::Motion},
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -157,11 +159,12 @@ pub struct Report {
     pub ok:bool,
     pub player_candidate:Option<crate::local_player::Candidate>,
     pub index_candidate:Option<usize>,
+    pub player_hitboxes:Option<Vec<crate::collision::Hit>>,
 }
 impl Report {
     fn new(title:&str,kind:ValueKind)->Self{
         Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new(),ok:true,
-            player_candidate:None,index_candidate:None}
+            player_candidate:None,index_candidate:None,player_hitboxes:None}
     }
 }
 pub fn parse_address(raw:&str)->Result<usize,String>{
@@ -229,6 +232,55 @@ fn enumerate_regions(options:ScanOptions)->Vec<Region>{
     out
 }
 
+
+/// Heap-oriented scanning: enumerate all committed private, writable memory
+/// before applying the byte budget. The generic scanner historically spent its
+/// entire first 128 MiB on early low-address regions, missing high-address
+/// Bedrock world / Actor allocations.
+fn collision_regions(options:ScanOptions)->Vec<Region>{
+    let mut candidates:Vec<(Region,bool)>=Vec::new();
+    let mut address=options.start;
+    while address<options.end && candidates.len()<200000 {
+        let mut info:MEMORY_BASIC_INFORMATION=unsafe{mem::zeroed()};
+        if unsafe{VirtualQuery(address as *const c_void,&mut info,
+            mem::size_of::<MEMORY_BASIC_INFORMATION>())}==0{break;}
+        let start=(info.BaseAddress as usize).max(options.start);
+        let next=(info.BaseAddress as usize).saturating_add(info.RegionSize);
+        if next<=address{break;}
+        let stop=next.min(options.end);
+        if info.State==MEM_COMMIT && options.scope.accepts(info.Protect) &&
+            start<stop && stop-start>=crate::collision::AABB_BYTES {
+            candidates.push((Region{base:start,len:stop-start},info.Type==MEM_PRIVATE));
+        }
+        address=next;
+    }
+    // Prefer private heap and larger pages, then round-robin sample ranges.
+    // Very large allocations must not monopolize the entire scan budget.
+    candidates.sort_unstable_by(|a,b|{
+        b.1.cmp(&a.1).then_with(||b.0.len.cmp(&a.0.len))
+    });
+    let mut list=Vec::new();
+    let mut budget=options.byte_limit();
+    let mut cursors=vec![0usize;candidates.len()];
+    const SLICE:usize=4*1024*1024;
+    while budget>=crate::collision::AABB_BYTES {
+        let mut progress=false;
+        for (i,(region,_)) in candidates.iter().enumerate() {
+            let cursor=cursors[i];
+            if cursor>=region.len {continue;}
+            if budget<crate::collision::AABB_BYTES {break;}
+            let len=(region.len-cursor).min(SLICE).min(budget);
+            if len<crate::collision::AABB_BYTES {continue;}
+            list.push(Region{base:region.base+cursor,len});
+            cursors[i]+=len;
+            budget-=len;
+            progress=true;
+        }
+        if !progress{break;}
+    }
+    list
+}
+
 pub struct Engine{
     pub busy:bool,
     tx:Option<SyncSender<Command>>,
@@ -272,13 +324,104 @@ impl Drop for Engine {
         if let Some(handle)=self.handle.take(){let _=handle.join();}
     }
 }
-struct ScanState { hits:Vec<Hit>,kind:ValueKind,cancel:Arc<AtomicBool> }
+struct ScanState { hits:Vec<Hit>,kind:ValueKind,cancel:Arc<AtomicBool>,player_hitboxes:Vec<crate::collision::Hit> }
 impl ScanState{
-    fn new(cancel:Arc<AtomicBool>)->Self{Self{hits:Vec::new(),kind:ValueKind::F32,cancel}}
+    fn new(cancel:Arc<AtomicBool>)->Self{Self{hits:Vec::new(),kind:ValueKind::F32,cancel,player_hitboxes:Vec::new()}}
 }
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::ScanPlayerAabb{profile,options}=>{
+                let mut report=Report::new("玩家碰撞箱首次扫描",self.kind);
+                let (profile,options)=match (profile.validate(),options.validate()) {
+                    (Ok(p),Ok(o))=>(p,o),
+                    (Err(e),_)|(_,Err(e))=>{
+                        report.ok=false;report.lines.push(e);return report;
+                    }
+                };
+                let mut hits=Vec::new();
+                let mut bytes_scanned=0usize;
+                let mut failed_blocks=0usize;
+                let mut cancelled=false;
+                const RESULT_LIMIT:usize=8192;
+                'regions:for region in collision_regions(options) {
+                    let mut offset=0usize;
+                    let mut overlap=Vec::new();
+                    while offset<region.len {
+                        if self.cancel.load(Ordering::Acquire){cancelled=true;break 'regions;}
+                        let size=(region.len-offset).min(BLOCK);
+                        let addr=region.base+offset;
+                        match read(addr,size){
+                            Ok(block)=>{
+                                let mut data=overlap.clone();
+                                data.extend_from_slice(&block);
+                                let base=addr-overlap.len();
+                                crate::collision::scan_bytes(base,&data,profile,RESULT_LIMIT,&mut hits);
+                                let count=(crate::collision::AABB_BYTES-1).min(data.len());
+                                overlap=data[data.len()-count..].to_vec();
+                                // Prevent overlap across discontiguous slices.
+                                // The next region may have unrelated address space.
+                            }
+                            Err(_)=>{failed_blocks+=1;overlap.clear();}
+                        }
+                        bytes_scanned+=size;
+                        offset+=size;
+                        if hits.len()>=RESULT_LIMIT {break 'regions;}
+                    }
+                }
+                if cancelled {
+                    report.ok=false;
+                    report.lines.push("扫描已取消；保留原候选状态，未提交部分结果".into());
+                    report.player_hitboxes=Some(self.player_hitboxes.clone());
+                    return report;
+                }
+                hits.sort_unstable_by_key(|h|h.address);
+                hits.dedup_by_key(|h|h.address);
+                self.player_hitboxes=hits;
+                report.lines.push(format!(
+                    "玩家碰撞箱候选={}；扫描={} MiB；读取失败块={}；预算={} MiB；宽={:.3} 高={:.3} 容差={:.3}",
+                    self.player_hitboxes.len(),bytes_scanned/1048576,failed_blocks,
+                    options.budget_mib,profile.width,profile.height,profile.tolerance));
+                report.lines.push("本结果仅是空间几何特征；含其他玩家、实体及物理缓存，不能直接作为 LocalPlayer 地址".into());
+                report.player_hitboxes=Some(self.player_hitboxes.clone());
+                report
+            },
+            Command::RefinePlayerAabb{profile,motion}=>{
+                let mut report=Report::new("玩家碰撞箱动态筛选",self.kind);
+                let profile=match profile.validate(){
+                    Ok(p)=>p,Err(e)=>{report.ok=false;report.lines.push(e);return report;}
+                };
+                if self.player_hitboxes.is_empty(){
+                    report.ok=false;
+                    report.lines.push("尚无候选，请先运行玩家碰撞箱首次扫描".into());
+                    return report;
+                }
+                let mut filtered=Vec::new();
+                for hit in &self.player_hitboxes {
+                    if self.cancel.load(Ordering::Acquire){
+                        report.ok=false;
+                        report.lines.push("动态筛选已取消，保留原候选列表".into());
+                        report.player_hitboxes=Some(self.player_hitboxes.clone());
+                        return report;
+                    }
+                    let Some(now)=read(hit.address,crate::collision::AABB_BYTES)
+                        .ok().and_then(|data|crate::collision::parse_aabb(&data)) else {continue;};
+                    if !profile.matches(now)||!motion.accepts(hit.box3,now){continue;}
+                    let old=hit.box3.center();
+                    let new=now.center();
+                    let mut next=hit.clone();
+                    next.traveled+=((new.x-old.x).powi(2)+(new.z-old.z).powi(2)).sqrt();
+                    next.vertical+=(new.y-old.y).abs();
+                    next.box3=now;
+                    next.samples=next.samples.saturating_add(1);
+                    filtered.push(next);
+                }
+                self.player_hitboxes=filtered;
+                report.lines.push(format!("动作={}，剩余碰撞箱候选 {} 项。重复不同动作筛选，直至足够少。",
+                    motion.label(),self.player_hitboxes.len()));
+                report.player_hitboxes=Some(self.player_hitboxes.clone());
+                report
+            },
             Command::ProbeLocalPlayer{source,kind,access}=>{
                 let mut r=Report::new("本地玩家候选检查",self.kind);
                 match crate::local_player::probe(source,kind,access) {

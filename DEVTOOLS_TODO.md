@@ -23,6 +23,10 @@
 - [ ] 真实 RenderDragon 游戏帧捕获：WGC/后端特定 GPU 安全读回，不再依赖 PrintWindow/桌面截取；支持帧时间戳和分辨率代次
 
 ## 本地玩家（LocalPlayer）统一定位工作区
+- [x] 新增实体几何初筛：AABB [minXYZ,maxXYZ]、宽高公差、可选世界坐标、私有堆优先分段扫描与走动/跳跃二次筛选
+- [x] AABB 线框示意、候选分页、地址复制及十六进制检查，不把碰撞箱候选伪装为 Actor/LocalPlayer 身份
+- [ ] 由 AABB 候选反推所属 Actor 对象/组件及与客户端受控实体对应关系，加入视角和生命周期交叉验证
+- [ ] 不同玩家姿态/3D 碰撞形态识别、非 AABB 排列和 ECS Transform/Bounds 格式适配
 - [x] 专用 LocalPlayer 工作区、参考 AOB 游戏 EXE 可执行区查找、只读虚表索引解码
 - [x] 已知 ClientInstance 对象或指针槽的只读验证；手动成员偏移探测 / 虚表入口候选
 - [x] 游戏主 EXE SHA-256 绑定的候选规则保存（无运行时绝对指针），标注 candidate-only
