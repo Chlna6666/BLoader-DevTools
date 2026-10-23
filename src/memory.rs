@@ -146,6 +146,7 @@ pub enum Command {
     FindLocalPlayerIndex,
     ScanPlayerAabb {profile:crate::collision::Profile,options:ScanOptions},
     RefinePlayerAabb {profile:crate::collision::Profile,motion:crate::collision::Motion},
+    DiscoverLocalPlayer(crate::discovery::Options),
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -160,11 +161,12 @@ pub struct Report {
     pub player_candidate:Option<crate::local_player::Candidate>,
     pub index_candidate:Option<usize>,
     pub player_hitboxes:Option<Vec<crate::collision::Hit>>,
+    pub discovery:Option<crate::discovery::Report>,
 }
 impl Report {
     fn new(title:&str,kind:ValueKind)->Self{
         Self{title:title.into(),lines:Vec::new(),hits:Vec::new(),kind,dump:Vec::new(),dump_base:0,watch_values:Vec::new(),ok:true,
-            player_candidate:None,index_candidate:None,player_hitboxes:None}
+            player_candidate:None,index_candidate:None,player_hitboxes:None,discovery:None}
     }
 }
 pub fn parse_address(raw:&str)->Result<usize,String>{
@@ -331,6 +333,19 @@ impl ScanState{
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::DiscoverLocalPlayer(options)=>{
+                let mut report=Report::new("统一本地玩家分析",self.kind);
+                match crate::discovery::run(options,&self.cancel){
+                    Ok(evidence)=>{
+                        report.ok=!evidence.cancelled;
+                        report.lines=crate::discovery::summarise(&evidence).lines()
+                            .map(str::to_owned).collect();
+                        report.discovery=Some(evidence);
+                    },
+                    Err(e)=>{report.ok=false;report.lines.push(e);}
+                }
+                report
+            },
             Command::ScanPlayerAabb{profile,options}=>{
                 let mut report=Report::new("玩家碰撞箱首次扫描",self.kind);
                 let (profile,options)=match (profile.validate(),options.validate()) {

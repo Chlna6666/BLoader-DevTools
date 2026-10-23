@@ -1,6 +1,6 @@
 # BLoader DevTools
 
-版本：0.2.3 · 作者：Chlna6666 · GPL-3.0-only
+版本：0.3.0 · 作者：Chlna6666 · GPL-3.0-only
 
 项目：https://github.com/Chlna6666/BLoader-DevTools
 
@@ -66,6 +66,25 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 - 特征数据库写回改用 Windows 文件替换机制，避免第二次保存已有特征时文件重名失败。
 - 仍待实现完全可拖拽的 IntelliJ IDEA 停靠面板、CE AutoAssembler、硬件断点、指针扫描、真正 RenderDragon 帧捕获与跨版本 CFG/ABI 迁移；详见 [DEVTOOLS_TODO.md](DEVTOOLS_TODO.md)。
 
+
+## 0.3.0 统一本地玩家分析链路（实验性）
+
+针对“碰撞箱候选=0，扫描=128 MiB”的反馈，新增独立 DevTools 后台任务：Symbol Resolver → ECS Inspector → LocalPlayer Validator。在「本地玩家定位」页点击「开始统一分析」，或使用本机 MCP：
+
+~~~text
+devtools_player_discover(x=玩家X, y=玩家脚底Y, z=玩家Z, radius=3, budget_mib=256)
+devtools_player_report()
+~~~
+
+**第一阶段（Symbol Resolver）**：针对进程主 EXE 的可执行页扫描旧版 getLocalPlayer 参考 AOB，核查唯一匹配及指令编码，并解析虚表索引。它不是 PDB 自动解析，也不能证明新的客户端版本存在相同 getter。已知 ClientInstance 指针可作为可选输入，用于进一步只读检查 getter 入口。
+
+**第二阶段（ECS Inspector）**：枚举真实可写 MEM_PRIVATE 区域，以有限预算跨区域采样，并记录扫描 MiB / 总可读私有区 MiB 及覆盖百分比。尝试 24 字节 AABB，同时在提供玩家世界坐标时匹配独立 Vec3 浮点位置结构，不再假设所有客户端都把 AABB 按六个 float32 连续存放。选择最近的空间候选后，查找引用该内存位置附近结构的指针槽，启发式检查邻近 MSVC C++ RTTI。
+
+**第三阶段（LocalPlayer Validator）**：按空间距离、形状、指针引用和 RTTI 给出解释性候选与证据。即使 RTTI 包含 Player，也仍缺少 ClientInstance::getLocalPlayer() 的正确游戏线程返回值验证，不能标记为已确认 LocalPlayer，也不能输出可调用的 Actor* 给普通 Mod。引用链和 RTTI 不一定存在。此阶段目前只提供只读启发式校验，不调用游戏函数或安装 Hook。
+
+为什么原扫描可能为 0：128 MiB 只是有限读取预算，不是整个游戏堆；原始算法按可读区域排序抽样，且只匹配 AABB 连续 minXYZ,maxXYZ 布局。某些构建把位置、尺寸和 AABB 放在不同 ECS 组件，或使用不同对象姿态。建议在游戏显示坐标后填入精确 XYZ，使工具同时进行 Vec3 检索。提高预算不等于必然能定位玩家。
+
+这个统一工具完全由 DevTools DLL 自己维护，不修改 BLoader，也不需要独立 EXE。仍待完成的关键 P0：真实客户端符号来源（PDB/签名数据库）、确定的 ActorOwner/PlayerComponent 布局、在游戏线程安全执行 getter 及进入/退出世界的对象生命周期验证。
 
 ## 0.2.3 玩家碰撞箱 / 3D 实体候选快速查找
 

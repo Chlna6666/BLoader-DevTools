@@ -40,6 +40,8 @@ pub(crate) enum UiCommand {
     CollisionScan(crate::collision::Profile,usize,SyncSender<Result<String,String>>),
     CollisionRefine(crate::collision::Motion,SyncSender<Result<String,String>>),
     CollisionResults(usize,SyncSender<String>),
+    PlayerDiscover(crate::discovery::Options,SyncSender<Result<String,String>>),
+    PlayerReport(SyncSender<String>),
 }
 static UI_COMMANDS: Mutex<VecDeque<UiCommand>> = Mutex::new(VecDeque::new());
 
@@ -219,6 +221,24 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
                 "inputSchema":{"type":"object","properties":{"tab":{"type":"string"}},"required":["tab"]}
             },
             {
+                "name":"devtools_player_discover",
+                "description":"运行统一只读 Symbol Resolver→ECS Inspector→LocalPlayer Validator。扫描匹配宽高的 AABB，若提供 x/y/z 则回退到 Vec3 空间坐标；分析组件指针引用与 RTTI。结果只为候选，不能直接作为 LocalPlayer*。所有深度扫描均在独立后台线程。",
+                "inputSchema":{"type":"object","properties":{
+                    "width":{"type":"number"},
+                    "height":{"type":"number"},
+                    "tolerance":{"type":"number"},
+                    "budget_mib":{"type":"integer","minimum":16,"maximum":1024},
+                    "x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},
+                    "radius":{"type":"number"},
+                    "client_instance":{"type":"string","description":"可选：已知的 ClientInstance 候选十六进制地址"}
+                }}
+            },
+            {
+                "name":"devtools_player_report",
+                "description":"获取统一分析的后台任务状态、真实扫描覆盖率、符号候选、ECS 引用和 RTTI 验证证据。没有游戏线程 getter 的身份验证时只返回候选。",
+                "inputSchema":{"type":"object","properties":{}}
+            },
+            {
                 "name":"devtools_collision_scan",
                 "description":"后台扫描进程内玩家尺寸 AABB (6 f32)，可指定宽高、容差、内存预算和可选玩家脚底 XYZ。返回任务已提交，不保证识别 LocalPlayer。",
                 "inputSchema":{"type":"object","properties":{
@@ -346,6 +366,38 @@ fn call_tool(request:&Value) -> Value {
             if tab.len()>32{return Err("标签名称过长".into());}
             let result=ui_request(|reply|UiCommand::Navigate(tab.to_owned(),reply))??;
             return Ok(json!({"content":[{"type":"text","text":result}]}));
+        }
+        if name=="devtools_player_discover" {
+            let mut profile=crate::collision::Profile::default();
+            if let Some(n)=args["width"].as_f64(){profile.width=n as f32;}
+            if let Some(n)=args["height"].as_f64(){profile.height=n as f32;}
+            if let Some(n)=args["tolerance"].as_f64(){profile.tolerance=n as f32;}
+            if let Some(n)=args["radius"].as_f64(){profile.radius=n as f32;}
+            let xyz=[args["x"].as_f64(),args["y"].as_f64(),args["z"].as_f64()];
+            if xyz.iter().any(Option::is_some){
+                let (Some(x),Some(y),Some(z))=(xyz[0],xyz[1],xyz[2]) else {
+                    return Err("需要同时提供 x/y/z 三个坐标".into());
+                };
+                profile.feet_hint=Some(crate::collision::Vec3{
+                    x:x as f32,y:y as f32,z:z as f32,
+                });
+            }
+            let budget=args["budget_mib"].as_u64().unwrap_or(256);
+            if !(16..=1024).contains(&budget){return Err("扫描预算不在 16–1024 MiB".into());}
+            let client_instance=match args["client_instance"].as_str(){
+                Some(raw)=>Some(crate::memory::parse_address(raw)?),
+                None=>None,
+            };
+            let options=crate::discovery::Options{
+                profile:profile.validate()?,budget_mib:budget as usize,
+                source_instance:client_instance,
+            }.validate()?;
+            let result=ui_request(|reply|UiCommand::PlayerDiscover(options,reply))??;
+            return Ok(json!({"content":[{"type":"text","text":result}]}));
+        }
+        if name=="devtools_player_report" {
+            let report=ui_request(UiCommand::PlayerReport)?;
+            return Ok(json!({"content":[{"type":"text","text":report}]}));
         }
         if name=="devtools_collision_scan" {
             let mut profile=crate::collision::Profile::default();

@@ -659,6 +659,16 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     let result=workbench.collision_results_for_ai(limit);
                     let _=reply.send(result);
                 }
+                crate::mcp::UiCommand::PlayerDiscover(options,reply)=>{
+                    let result=workbench.discover_player_for_ai(
+                        options.profile,options.budget_mib,options.source_instance);
+                    let _=reply.send(result);
+                    mark_dirty(None);
+                }
+                crate::mcp::UiCommand::PlayerReport(reply)=>{
+                    let result=workbench.discovery_status_for_ai();
+                    let _=reply.send(result);
+                }
             }
         }
 

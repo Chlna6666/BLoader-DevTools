@@ -1,4 +1,4 @@
-# DevTools 功能与正确性路线图（0.2.1）
+# DevTools 功能与正确性路线图（0.3.0）
 > 目标：完全由 DevTools.dll 实现原生调试与 AI 自动化；BLoader 只提供加载、卸载、日志。所有勾选以代码与 Windows 编译测试为依据，游戏实机结果单列记录。
 
 ## 当前已实现
@@ -21,6 +21,17 @@
 - [ ] CPU/GPU/内存遥测：空闲帧请求、截图频率、扫描尾延迟、窗口资源生命周期
 - [x] 游戏 HWND 在前台时尝试 GDI 桌面合成截图，实验性 PrintWindow 回退；放宽 window_info/click 的截图大小限制
 - [ ] 真实 RenderDragon 游戏帧捕获：WGC/后端特定 GPU 安全读回，不再依赖 PrintWindow/桌面截取；支持帧时间戳和分辨率代次
+
+## 0.3.0 统一发现链路
+- [x] Symbol Resolver：主 EXE 可执行页参考 AOB 搜索、唯一匹配与 x64 虚表索引解析；可选 ClientInstance 候选的只读 getter 入口检查
+- [x] ECS Inspector：MEM_PRIVATE 可写内存容量与覆盖率诊断、跨区域采样；可选玩家 HUD XYZ 的 AABB + Vec3 位置双路径初筛
+- [x] ECS Inspector：优先候选的指针反向引用查询、MSVC x64 RTTI 启发式 Actor/Player 类型线索
+- [x] LocalPlayer Validator：空间/结构/引用/RTTI 分级证据，所有结果保持候选身份；没有 getter 结果时禁止假称已定位
+- [x] UI 和 MCP：一键统一后台分析、覆盖率/引用报告、取消支持
+- [ ] GameAssembly/多模块扫描与 PDB/已确认符号映射、独立符号版本数据库
+- [ ] 根据客户端游戏线程和真实 ECS 注册表验证 PlayerComponent/ActorOwnerComponent，取得真正 LocalPlayer*
+- [ ] 反引用阶段由受信任的组件偏移数据驱动；避免当前启发式 RTTI 假阳性
+- [ ] 真实 Minecraft 本机、远程会话、不同构建的端到端数据验证
 
 ## 本地玩家（LocalPlayer）统一定位工作区
 - [x] 新增实体几何初筛：AABB [minXYZ,maxXYZ]、宽高公差、可选世界坐标、私有堆优先分段扫描与走动/跳跃二次筛选

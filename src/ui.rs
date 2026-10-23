@@ -5,6 +5,7 @@ use crate::{
     memory::{self,Command,Engine,Filter,Hit,ValueKind,ScanScope,ScanOptions},
     local_player::{self,Candidate,PlayerAccess,SourceKind},
     collision::{self,Motion},
+    discovery::{self,Options as DiscoveryOptions},
     signature::{Pattern,decode_hex},
 };
 use egui::{Align,Color32,FontFamily,FontId,Frame,Layout,RichText,ScrollArea,Stroke,TextEdit,Ui,Vec2};
@@ -203,6 +204,8 @@ pub struct Workbench {
     collision_motion:Motion,
     collision_selected:Option<usize>,
     collision_page:usize,
+    discovery_report:Option<discovery::Report>,
+    discovery_budget:usize,
 }
 impl Default for Workbench{
     fn default()->Self{
@@ -249,6 +252,8 @@ impl Default for Workbench{
             collision_motion:Motion::Horizontal,
             collision_selected:None,
             collision_page:0,
+            discovery_report:None,
+            discovery_budget:256,
         }
     }
 }
@@ -320,6 +325,30 @@ impl Workbench{
         self.collision_motion=motion;
         self.tab=Tab::LocalPlayer;
         Ok(format!("已提交碰撞箱{}筛选；等待完成后读取结果",motion.label()))
+    }
+    pub fn discover_player_for_ai(&mut self,profile:collision::Profile,budget:usize,
+        instance:Option<usize>)->Result<String,String>{
+        let options=DiscoveryOptions{profile,budget_mib:budget,source_instance:instance}.validate()?;
+        self.engine.submit(Command::DiscoverLocalPlayer(options))?;
+        self.tab=Tab::LocalPlayer;
+        self.discovery_report=None;
+        self.discovery_budget=budget;
+        self.collision_width=profile.width;
+        self.collision_height=profile.height;
+        self.collision_tolerance=profile.tolerance;
+        self.collision_use_coords=profile.feet_hint.is_some();
+        if let Some(coords)=profile.feet_hint {
+            self.collision_coords=[coords.x.to_string(),coords.y.to_string(),coords.z.to_string()];
+        }
+        self.collision_radius=profile.radius;
+        Ok("已提交 Symbol Resolver → ECS Inspector → LocalPlayer Validator；用 devtools_player_report 轮询（任何结果只作为候选）。".into())
+    }
+    pub fn discovery_status_for_ai(&mut self)->String{
+        self.poll();
+        match &self.discovery_report{
+            Some(r)=>format!("busy={}\n{}",self.engine.busy,discovery::summarise(r)),
+            None=>format!("busy={}；尚无统一定位报告或任务尚未完成",self.engine.busy),
+        }
     }
     pub fn collision_results_for_ai(&mut self,count:usize)->String {
         // poll now, as the user might query from MCP without an active
@@ -393,6 +422,9 @@ impl Workbench{
                 for line in &report.lines {self.log(line.clone());}
             }
             match report.title.as_str(){
+                "统一本地玩家分析"=>{
+                    self.discovery_report=report.discovery;
+                },
                 "玩家碰撞箱首次扫描"|"玩家碰撞箱动态筛选"=>{
                     if let Some(items)=report.player_hitboxes {
                         self.collision_hits=items;
@@ -612,6 +644,76 @@ impl Workbench{
         ui.heading("本地玩家 / LocalPlayer 定位向导");
         ui.label(RichText::new("开发常用路径：ClientInstance → getLocalPlayer() → LocalPlayer。此页只读，不调用未验证的游戏虚函数。")
             .color(self.muted()).small());
+        ui.add_space(8.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.heading("一键分析 · Symbol Resolver → ECS Inspector → LocalPlayer Validator");
+            ui.label(RichText::new("按游戏模块参考符号定位，再检查 ECS 碰撞箱/位置向量和内存引用；最后尝试 MSVC RTTI 对象类型校验。全程后台只读。")
+                .color(self.muted()).small());
+            ui.horizontal_wrapped(|ui|{
+                ui.label("扫描预算（MiB）");
+                ui.add(egui::DragValue::new(&mut self.discovery_budget).range(16..=1024).speed(16));
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("开始统一分析")).clicked(){
+                    match self.collision_profile(){
+                        Ok(profile)=>{
+                            let instance=memory::parse_address(&self.player_source).ok()
+                                .filter(|addr|*addr>=0x10000);
+                            let opts=DiscoveryOptions{
+                                profile,budget_mib:self.discovery_budget,source_instance:instance,
+                            };
+                            if let Err(e)=opts.validate(){
+                                self.log(format!("分析参数错误：{e}"));
+                            }else{
+                                self.discovery_report=None;
+                                self.job(Command::DiscoverLocalPlayer(opts));
+                            }
+                        }
+                        Err(e)=>self.log(format!("分析参数错误：{e}")),
+                    }
+                }
+            });
+            if self.collision_use_coords {
+                ui.label(RichText::new("已启用 HUD 坐标：额外检索 Vec3 位置结构，即使 AABB 布局改变仍可给出空间候选。")
+                    .small().color(GREEN));
+            } else {
+                ui.label(RichText::new("建议勾选下方「利用已知世界坐标」并输入玩家的 X/Y/Z。没有坐标时，仍可能因组件布局变化出现零候选。")
+                    .small().color(self.muted()));
+            }
+            ui.label(RichText::new("无论是否命中：仅凭 RTTI、引用链或空间位置都不能证明本地玩家身份，未取得游戏线程 getter 结果前不会导出 Actor*。")
+                .small().color(self.muted()));
+            if let Some(report)=&self.discovery_report{
+                ui.separator();
+                ui.strong(format!("符号定位：{}",report.symbol.status));
+                ui.label(format!(
+                    "ECS 私有堆覆盖 {:.2}%（读 {:.1} / {:.1} MiB） · 读取失败 {} · 候选 {}",
+                    if report.eligible_bytes>0 {100.*report.scanned_bytes as f64/report.eligible_bytes as f64}else{0.},
+                    report.scanned_bytes as f64/1048576.,
+                    report.eligible_bytes as f64/1048576.,
+                    report.failed_reads,report.seeds.len()
+                ));
+                if report.cancelled{
+                    ui.colored_label(Color32::YELLOW,"已取消；结果非完整扫描");
+                }
+                for item in report.inspected.iter().take(5){
+                    ui.horizontal_wrapped(|ui|{
+                        ui.monospace(format!("0x{:X}",item.seed.address));
+                        ui.label(format!("{} · {} · 得分 {} · 引用 {}",
+                            item.seed.kind.label(),item.confidence,item.score,item.links.len()));
+                        if ui.small_button("复制地址").clicked(){
+                            ui.ctx().copy_text(format!("0x{:X}",item.seed.address));
+                        }
+                    });
+                    for link in item.links.iter().take(3) {
+                        ui.label(RichText::new(format!(
+                            "    ECS 引用 0x{:X} → 0x{:X}，候选 Actor: {}",
+                            link.pointer_slot,link.points_to,
+                            link.type_hint.as_deref().unwrap_or("RTTI 未识别")
+                        )).monospace().small().color(self.muted()));
+                    }
+                }
+                ui.label(RichText::new("完整阶段报告已输出到底部任务控制台，也可通过 MCP 的 devtools_player_report 获取。")
+                    .small().color(self.muted()));
+            }
+        });
         ui.add_space(8.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
             ui.heading("快速查找 · 玩家 3D 碰撞箱");
