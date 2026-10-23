@@ -205,21 +205,29 @@ fn push_geometry(base:usize,data:&[u8],profile:Profile,results:&mut Vec<Seed>){
         // Validate complete AABB first, but fall back to a location vector
         // when the client stores shape bounds in a different ECS component.
         if data.len()-i>=24 {
-            if let Some(box3)=collision::parse_aabb(&data[i..i+24]){
-                if profile.matches(box3){
-                    let pos=box3.center();
-                    let dist=profile.feet_hint.map_or(0.,|p|point_distance(pos,p));
-                    results.push(Seed{address:base+i,kind:SeedKind::Aabb,position:pos,distance:dist});
-                    continue;
+            // Fast reject with only the first dimension, before decoding all
+            // six f32 values. Exactly the same width predicate as Profile::matches.
+            let x0=f32::from_le_bytes(data[i..i+4].try_into().unwrap());
+            let x1=f32::from_le_bytes(data[i+12..i+16].try_into().unwrap());
+            if (x1-x0-profile.width).abs()<=profile.tolerance {
+                if let Some(box3)=collision::parse_aabb(&data[i..i+24]){
+                    if profile.matches(box3){
+                        let pos=box3.center();
+                        let dist=profile.feet_hint.map_or(0.,|p|point_distance(pos,p));
+                        results.push(Seed{address:base+i,kind:SeedKind::Aabb,position:pos,distance:dist});
+                        continue;
+                    }
                 }
             }
         }
-        if let (Some(p),Some(hint))=(vec3_at(&data[i..i+12]),profile.feet_hint){
-            let d=point_distance(p,hint);
-            // 3D coordinates can represent a location instead of hitbox
-            // bounds. Do not infer a player type from this alone.
-            if d<=profile.radius {
-                results.push(Seed{address:base+i,kind:SeedKind::Vec3Position,position:p,distance:d});
+        // Avoid decoding a Vec3 at every 4-byte position when no HUD
+        // coordinates were supplied (the common exhaustive-scan path).
+        if let Some(hint)=profile.feet_hint {
+            if let Some(p)=vec3_at(&data[i..i+12]){
+                let d=point_distance(p,hint);
+                if d<=profile.radius {
+                    results.push(Seed{address:base+i,kind:SeedKind::Vec3Position,position:p,distance:d});
+                }
             }
         }
     }

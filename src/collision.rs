@@ -105,6 +105,9 @@ pub fn scan_bytes(base:usize,bytes:&[u8],profile:Profile,limit:usize,out:&mut Ve
     // starts can be at 4-byte offsets even when object headers are 8-byte aligned.
     let first=(4-base%4)%4;
     for offset in (first..=bytes.len()-AABB_BYTES).step_by(4){
+        let x0=f32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap());
+        let x1=f32::from_le_bytes(bytes[offset+12..offset+16].try_into().unwrap());
+        if (x1-x0-profile.width).abs()>profile.tolerance{continue;}
         let Some(aabb)=parse_aabb(&bytes[offset..offset+AABB_BYTES]) else {continue;};
         if profile.matches(aabb){
             out.push(Hit{
