@@ -7,7 +7,7 @@ use std::{cmp::Ordering as Cmp,collections::HashMap,ffi::c_void,mem,sync::atomic
 use windows_sys::Win32::System::Memory::{
     VirtualQuery,MEMORY_BASIC_INFORMATION,MEM_COMMIT,MEM_PRIVATE,
     PAGE_GUARD,PAGE_NOACCESS,PAGE_READWRITE,PAGE_WRITECOPY,
-    PAGE_EXECUTE_READWRITE,PAGE_EXECUTE_WRITECOPY,PAGE_READONLY,
+    PAGE_EXECUTE_READWRITE,PAGE_EXECUTE_WRITECOPY,
     PAGE_EXECUTE_READ,
 };
 use crate::{collision::{self,Profile,Vec3},inspection,local_player,memory,signature::Pattern,ecs_layout};

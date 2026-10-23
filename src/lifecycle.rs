@@ -216,7 +216,7 @@ unsafe extern "system" fn on_update(instance:*mut c_void,ready:bool)->bool{
                 let player=if address!=0 && ready &&
                     ENABLED.load(Ordering::Acquire) {
                     let getter:GetterFn=unsafe{mem::transmute(address)};
-                    unsafe{getter(instance)} as usize
+                    (unsafe{getter(instance)}) as usize
                 }else{0};
                 SNAPSHOT_SEQ.fetch_add(1,Ordering::AcqRel); // odd: writer
                 INSTANCE.store(instance as usize,Ordering::Release);
