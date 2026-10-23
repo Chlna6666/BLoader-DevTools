@@ -5,7 +5,7 @@
 use std::{
     cell::RefCell, ffi::c_void, iter, mem, ptr,
     sync::{Arc, Mutex, atomic::{AtomicBool, AtomicIsize, Ordering}},
-    thread::{self, JoinHandle}, time::{Duration, Instant},
+    thread::{self, JoinHandle}, time::Duration,
 };
 
 use egui::{Context, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, TouchPhase, Vec2};
