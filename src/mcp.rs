@@ -236,7 +236,7 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
                     "width":{"type":"number"},
                     "height":{"type":"number"},
                     "tolerance":{"type":"number"},
-                    "budget_mib":{"type":"integer","minimum":16,"maximum":1024},
+                    "budget_mib":{"type":"integer","minimum":0,"maximum":1024},
                     "x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},
                     "radius":{"type":"number"},
                     "client_instance":{"type":"string","description":"可选：已知的 ClientInstance 候选十六进制地址"}
@@ -259,7 +259,7 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
                 "description":"后台扫描进程内玩家尺寸 AABB (6 f32)，可指定宽高、容差、内存预算和可选玩家脚底 XYZ。返回任务已提交，不保证识别 LocalPlayer。",
                 "inputSchema":{"type":"object","properties":{
                     "width":{"type":"number"},"height":{"type":"number"},
-                    "tolerance":{"type":"number"},"budget_mib":{"type":"integer","minimum":16,"maximum":1024},
+                    "tolerance":{"type":"number"},"budget_mib":{"type":"integer","minimum":0,"maximum":1024},
                     "x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},
                     "radius":{"type":"number"}
                 }}
@@ -415,8 +415,8 @@ fn call_tool(request:&Value) -> Value {
                     x:x as f32,y:y as f32,z:z as f32,
                 });
             }
-            let budget=args["budget_mib"].as_u64().unwrap_or(256);
-            if !(16..=1024).contains(&budget){return Err("扫描预算不在 16–1024 MiB".into());}
+            let budget=args["budget_mib"].as_u64().unwrap_or(0);
+            if budget!=0 && !(16..=1024).contains(&budget){return Err("预算应为 0（完整内存）或 16–1024 MiB".into());}
             let client_instance=match args["client_instance"].as_str(){
                 Some(raw)=>Some(crate::memory::parse_address(raw)?),
                 None=>None,

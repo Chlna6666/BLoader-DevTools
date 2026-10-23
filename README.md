@@ -228,3 +228,8 @@ CI 对 Windows x64/MSVC 进行单元测试、Release DLL 构建并上传完整 B
 - [Flarial dll-oss](https://github.com/flarialmc/dll-oss)：版本化 signature/offset 映射及 ClientInstance 封装；符号命名或 C++ 声明不是本地版本的地址/调用约定证明。
 - [MCBE_DX12_ModBase](https://github.com/b01dev/MCBE_DX12_ModBase)：模式解析、Hook 和运行时 SDK 的实现参考，不把其特定客户端版本中的签名导入默认启用路径。
 
+
+
+## 进程内存完整遍历（实验性）
+
+统一 LocalPlayer 分析的扫描预算设为 **0** 时，DevTools DLL 使用 `VirtualQuery + ReadProcessMemory(GetCurrentProcess())` 分块遍历本进程所有已提交可写页（包括 MEM_PRIVATE / MEM_MAPPED / MEM_IMAGE），不再限制 1024 MiB。可取消、块缓存复用；命中超出 1536 项时继续遍历并均匀保留代表性样本。使用非零 MiB 仍为抽样模式。若版本化符号和 ECS 组件身份缺失，遍历全部进程内存也不能确认 LocalPlayer。

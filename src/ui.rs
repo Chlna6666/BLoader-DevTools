@@ -259,7 +259,7 @@ impl Default for Workbench{
             collision_selected:None,
             collision_page:0,
             discovery_report:None,
-            discovery_budget:256,
+            discovery_budget:0,
             symbol_module:"Minecraft.Windows.exe".into(),
             symbol_name:"ClientInstance::getLocalPlayer".into(),
             symbol_use_pdb:false,
@@ -755,7 +755,10 @@ impl Workbench{
                 .color(self.muted()).small());
             ui.horizontal_wrapped(|ui|{
                 ui.label("扫描预算（MiB）");
-                ui.add(egui::DragValue::new(&mut self.discovery_budget).range(16..=1024).speed(16));
+                ui.add(egui::DragValue::new(&mut self.discovery_budget).range(0..=1024).speed(16));
+                ui.label(RichText::new(if self.discovery_budget==0{
+                    "0 = 直接完整遍历进程可写内存（可能耗时，支持取消）"
+                }else{"非零 = 只抽样部分内存"}).small().color(self.muted()));
                 if ui.add_enabled(!self.engine.busy,egui::Button::new("开始统一分析")).clicked(){
                     match self.collision_profile(){
                         Ok(profile)=>{
@@ -834,7 +837,7 @@ impl Workbench{
                 ui.separator();
                 ui.strong(format!("符号定位：{}",report.symbol.status));
                 ui.label(format!(
-                    "ECS 私有堆覆盖 {:.2}%（读 {:.1} / {:.1} MiB） · 读取失败 {} · 候选 {}",
+                    "进程可写内存覆盖 {:.2}%（读 {:.1} / {:.1} MiB） · 读取失败 {} · 保留候选 {}",
                     if report.eligible_bytes>0 {100.*report.scanned_bytes as f64/report.eligible_bytes as f64}else{0.},
                     report.scanned_bytes as f64/1048576.,
                     report.eligible_bytes as f64/1048576.,

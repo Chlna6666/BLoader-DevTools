@@ -181,13 +181,23 @@ pub fn parse_address(raw:&str)->Result<usize,String>{
     let s=s.strip_prefix("0x").or_else(||s.strip_prefix("0X")).unwrap_or(&s);
     usize::from_str_radix(s,16).map_err(|_|"请输入十六进制地址，例如 0x7FF600001000".into())
 }
-pub fn read(address:usize,size:usize)->Result<Vec<u8>,String>{
-    if address<0x10000 || size==0 || size>BLOCK{return Err("地址或读取长度不在允许范围内".into())}
-    let mut bytes=vec![0u8;size];
-    let mut got=0;
+pub(crate) fn read_into(address:usize,bytes:&mut [u8])->Result<(),String>{
+    if address<0x10000||bytes.is_empty()||bytes.len()>BLOCK||
+        address.checked_add(bytes.len()).is_none(){
+        return Err("读取地址或长度非法".into());
+    }
+    let mut got=0usize;
     let ok=unsafe{ReadProcessMemory(GetCurrentProcess(),address as *const c_void,
-        bytes.as_mut_ptr() as *mut c_void,size,&mut got)};
-    if ok==0 || got!=size {return Err(format!("无法读取 0x{address:X} ({got}/{size})"));}
+        bytes.as_mut_ptr().cast::<c_void>(),bytes.len(),&mut got)};
+    if ok==0||got!=bytes.len(){
+        return Err(format!("读取失败 0x{address:X} ({got}/{})",bytes.len()));
+    }
+    Ok(())
+}
+pub fn read(address:usize,size:usize)->Result<Vec<u8>,String>{
+    if size==0||size>BLOCK{return Err("读取长度非法".into());}
+    let mut bytes=vec![0;size];
+    read_into(address,&mut bytes)?;
     Ok(bytes)
 }
 fn writable(p:u32)->bool {

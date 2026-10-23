@@ -13,7 +13,7 @@ use windows_sys::Win32::System::Memory::{
 use crate::{collision::{self,Profile,Vec3},inspection,local_player,memory,signature::Pattern,ecs_layout};
 
 const BLOCK:usize=64*1024;
-const MAX_GEOMETRY:usize=1536;
+const MAX_GEOMETRY:usize=1536; // only the retained result limit
 const MAX_LINKS:usize=80;
 const MAX_SYMBOL_MATCHES:usize=32;
 
@@ -76,7 +76,7 @@ pub struct Options {
 impl Options {
     pub fn validate(self)->Result<Self,String>{
         self.profile.validate()?;
-        if !(16..=1024).contains(&self.budget_mib){return Err("分析预算应在 16–1024 MiB 之间".into());}
+        if self.budget_mib!=0 && !(16..=1024).contains(&self.budget_mib){return Err("预算必须为 0（完整内存）或 16–1024 MiB".into());}
         Ok(self)
     }
 }
@@ -259,48 +259,82 @@ fn geometry_regions(regions:&[Region],byte_budget:usize)->Vec<Region>{
     selected
 }
 
-fn collect_geometry(profile:Profile,budget:usize,cancel:&AtomicBool)
-    ->(Vec<Seed>,usize,usize,usize){
-    let valid_regions=regions(true,false,0x10000,usize::MAX);
+// Uniform reservoir sampling keeps a bounded set across the entire process;
+// a saturated candidate list never terminates memory traversal.
+struct CandidatePool{total:u64,random:u64,hits:Vec<Seed>}
+impl CandidatePool{
+    fn new()->Self{Self{total:0,random:0x9E3779B97F4A7C15,hits:Vec::new()}}
+    fn append(&mut self,hit:Seed){
+        self.total=self.total.saturating_add(1);
+        if self.hits.len()<MAX_GEOMETRY{self.hits.push(hit);return;}
+        self.random^=self.random<<13;
+        self.random^=self.random>>7;
+        self.random^=self.random<<17;
+        let index=self.random%self.total;
+        if index<MAX_GEOMETRY as u64{self.hits[index as usize]=hit;}
+    }
+}
+struct GeometryResult{
+    seeds:Vec<Seed>,scanned:usize,eligible:usize,failed:usize,total:u64,
+    regions_scanned:usize,
+}
+fn collect_geometry(profile:Profile,budget:usize,cancel:&AtomicBool)->GeometryResult{
+    // budget = 0 traverses every readable committed writable page in THIS
+    // process, including MEM_PRIVATE, MEM_MAPPED, and MEM_IMAGE.
+    let valid_regions=regions(false,false,0x10000,usize::MAX);
     let eligible=valid_regions.iter().map(|r|r.len as u64).sum::<u64>()
         .min(usize::MAX as u64) as usize;
-    let mut seeds=Vec::new();
+    let schedule=if budget==0{valid_regions.clone()}
+        else{geometry_regions(&valid_regions,budget)};
+    let mut pool=CandidatePool::new();
     let mut scanned=0usize;
     let mut failed=0usize;
+    let mut segments=0usize;
     let mut previous_end=0usize;
-    let mut leftover=Vec::new();
-    for segment in geometry_regions(&valid_regions,budget) {
+    let mut leftover=Vec::with_capacity(23);
+    let mut block=vec![0u8;BLOCK];
+    let mut matches=Vec::with_capacity(1024);
+    for segment in schedule{
         if cancel.load(Ordering::Acquire){break;}
+        segments+=1;
         let mut offset=0usize;
-        while offset<segment.len {
+        while offset<segment.len{
             if cancel.load(Ordering::Acquire){break;}
-            let address=segment.base+offset;
-            let len=(segment.len-offset).min(BLOCK);
-            if let Ok(bytes)=memory::read(address,len){
-                if previous_end!=address{leftover.clear();}
-                let mut buffer=leftover.clone();
-                buffer.extend_from_slice(&bytes);
-                push_geometry(address-leftover.len(),&buffer,profile,&mut seeds);
-                let n=23.min(buffer.len());
-                leftover=buffer[buffer.len()-n..].to_vec();
-                previous_end=address+len;
+            let at=segment.base+offset;
+            let n=(segment.len-offset).min(BLOCK);
+            if memory::read_into(at,&mut block[..n]).is_ok(){
+                if previous_end!=at{leftover.clear();}
+                let mut joined=Vec::with_capacity(leftover.len()+n);
+                joined.extend_from_slice(&leftover);
+                joined.extend_from_slice(&block[..n]);
+                matches.clear();
+                push_geometry(at-leftover.len(),&joined,profile,&mut matches);
+                for seed in matches.drain(..){
+                    let bytes=match seed.kind{
+                        SeedKind::Aabb=>24,SeedKind::Vec3Position=>12
+                    };
+                    if seed.address.checked_add(bytes).is_some_and(|end|end>at){
+                        pool.append(seed);
+                    }
+                }
+                let keep=23.min(joined.len());
+                leftover.clear();
+                leftover.extend_from_slice(&joined[joined.len()-keep..]);
+                previous_end=at+n;
             }else{failed+=1;leftover.clear();previous_end=0;}
-            scanned+=len;
-            offset+=len;
-            if seeds.len()>MAX_GEOMETRY*16{break;}
+            scanned=scanned.saturating_add(n);
+            offset+=n;
         }
-        if seeds.len()>MAX_GEOMETRY*16{break;}
     }
-    // Known coordinates are strong *spatial* filters, not type evidence.
+    let total=pool.total;
+    let mut seeds=pool.hits;
     seeds.sort_by(|a,b|a.distance.partial_cmp(&b.distance).unwrap_or(Cmp::Equal)
         .then_with(||match (a.kind,b.kind){
             (SeedKind::Aabb,SeedKind::Vec3Position)=>Cmp::Less,
-            (SeedKind::Vec3Position,SeedKind::Aabb)=>Cmp::Greater,
-            _=>Cmp::Equal,
+            (SeedKind::Vec3Position,SeedKind::Aabb)=>Cmp::Greater,_=>Cmp::Equal,
         }));
     seeds.dedup_by_key(|seed|seed.address);
-    seeds.truncate(MAX_GEOMETRY);
-    (seeds,scanned,eligible,failed)
+    GeometryResult{seeds,scanned,eligible,failed,total,regions_scanned:segments}
 }
 fn read_ptr(address:usize)->Option<usize>{
     let data=memory::read(address,8).ok()?;
@@ -488,12 +522,24 @@ pub fn run(options:Options,cancel:&AtomicBool)->Result<Report,String>{
             scanned_bytes:0,eligible_bytes:0,failed_reads:0,cancelled:true,messages,validation_rounds:0});
     }
     let budget=options.budget_mib*1024*1024;
-    let (seeds,scanned,eligible,failed)=collect_geometry(options.profile,budget,cancel);
+    let GeometryResult{seeds,scanned,eligible,failed,total,regions_scanned}=
+        collect_geometry(options.profile,budget,cancel);
     messages.push(format!(
-        "ECS 初筛：扫描 {:.1} MiB / 可写私有内存 {:.1} MiB（覆盖 {:.2}%），读取失败={failed}，几何/Vec3 候选={}",
+        "进程内存模式={}；扫描 {:.1} MiB / 已提交可写 {:.1} MiB（覆盖 {:.2}%）；区域={}；失败块={}；匹配总数={}；保留候选={}（最大 {}）",
+        if budget==0{"完整遍历"}else{"抽样"},
         scanned as f64/1048576.,eligible as f64/1048576.,
-        if eligible>0{100.*scanned as f64/eligible as f64}else{0.},seeds.len()
+        if eligible>0{100.*scanned as f64/eligible as f64}else{0.},
+        regions_scanned,failed,total,seeds.len(),MAX_GEOMETRY
     ));
+    if total>MAX_GEOMETRY as u64 {
+        messages.push("命中超过保留上限：已对全部扫描范围执行均匀蓄水池采样；显示候选非完整集合".into());
+    }
+    if cancel.load(Ordering::Acquire){
+        messages.push("内存遍历已取消，结果不完整".into());
+        return Ok(Report{build_id,symbol,seeds,inspected:Vec::new(),scanned_bytes:scanned,
+            eligible_bytes:eligible,failed_reads:failed,cancelled:true,
+            messages,validation_rounds:0});
+    }
     if options.profile.feet_hint.is_none(){
         messages.push("未提供玩家世界坐标：无 Vec3 模式，仍依赖 AABB 结构；建议输入 HUD XYZ 后重试".into());
     }
@@ -505,7 +551,7 @@ pub fn run(options:Options,cancel:&AtomicBool)->Result<Report,String>{
     // never run an N * whole-process memory scan on thousands of seeds.
     for (i,seed) in seeds.iter().take(5).enumerate(){
         if cancel.load(Ordering::Acquire){break;}
-        let links=collect_links(seed,options.budget_mib*1024*1024/2,cancel);
+        let links=collect_links(seed,64*1024*1024,cancel);
         messages.push(format!("ECS 指针引用 {}：0x{:X} 找到 {} 个可能的组件基址引用",
             i+1,seed.address,links.len()));
         inspected.push(validate(seed.clone(),links,&symbol,ecs_layout.as_ref()));
