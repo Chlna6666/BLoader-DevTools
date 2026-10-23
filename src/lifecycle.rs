@@ -285,13 +285,15 @@ pub fn install_observer()->Result<String,String>{
         control.patch_disabled=true;
     }
     clear_snapshot();
+    // A failed patch attempt is treated as potentially installed until stop()
+    // successfully disables it; BL v1 provides no unload veto.
+    control.active=true;
+    control.patch_disabled=false;
     if let Err(e)=min_hook_rs::enable_hook(target){
         // Do not release the trampoline even if the patch API reports failure.
         // On another thread the patch may already have become visible.
         return Err(format!("启用 Hook 失败：{e:?}；DLL 已固定，trampoline 不会被释放"));
     }
-    control.patch_disabled=false;
-    control.active=true;
     ENABLED.store(true,Ordering::Release);
     Ok(format!("已启用只读 ClientInstance::update 观察器；{} RVA 0x{:X}；Hook DLL/trampoline 将保留到游戏进程退出；getter 未授权",
         profile.update.module,profile.update.rva))
@@ -361,6 +363,11 @@ pub fn validate_captured_player()->Result<String,String>{
     if !active || !getter {
         return Err("需要先启用观察器，并由用户单独批准 getter ABI".into());
     }
+    // Hashing the executable and loading the profile can be expensive. Do it
+    // before obtaining the live snapshot so that validation only spans reads.
+    let build=crate::local_player::executable_build_id()?;
+    let layout=crate::ecs_layout::load_for_build(&build)?
+        .ok_or("没有与当前客户端 EXE SHA-256 完全匹配的 ecs_layouts.json 配置，拒绝使用旧版偏移")?;
     let snapshot=capture_snapshot().ok_or("采集快照正在更新，请重试")?;
     let now=unsafe{GetTickCount64()};
     if snapshot.last_seen==0 || now.saturating_sub(snapshot.last_seen)>OBSERVATION_TTL_MS {
@@ -374,9 +381,6 @@ pub fn validate_captured_player()->Result<String,String>{
     if player<0x10000 || player&7!=0 || instance<0x10000 {
         return Err("getter 当前返回 nullptr、非法地址，或 ClientInstance 尚未确认".into());
     }
-    let build=crate::local_player::executable_build_id()?;
-    let layout=crate::ecs_layout::load_for_build(&build)?
-        .ok_or("没有与当前客户端 EXE SHA-256 完全匹配的 ecs_layouts.json 配置，拒绝使用旧版偏移")?;
     let evidence=crate::ecs_layout::inspect_known_actor(player,&layout)
         .ok_or("getter 候选未通过 ActorOwner / Player / Shape 三组件及双向引用验证；不输出已确认对象")?;
     // A -> B -> A pointer reuse must also be rejected, not just address
@@ -461,6 +465,15 @@ mod tests{
         assert!(unsafe{on_update(this,true)});
         assert_eq!(PLAYER.load(Ordering::Acquire),this as usize);
         assert_eq!(IN_FLIGHT.load(Ordering::Acquire),0);
+        let before=capture_snapshot().unwrap();
+        let ptr=this as usize;
+        // A non-owner thread must never invoke the version-pinned getter.
+        let other=std::thread::spawn(move||unsafe{on_update(ptr as *mut c_void,true)});
+        assert!(other.join().unwrap());
+        let after=capture_snapshot().unwrap();
+        assert_eq!(before.thread,after.thread);
+        assert_eq!(before.epoch,after.epoch);
+        assert!(CONCURRENT_SKIPS.load(Ordering::Acquire)>=1);
         // Disabled capture must still forward the original callback.
         ENABLED.store(false,Ordering::Release);
         GETTER.store(synthetic_getter as usize,Ordering::Release);

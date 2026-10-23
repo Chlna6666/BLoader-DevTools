@@ -36,7 +36,8 @@
 - [x] 回调只记录原子状态，调用原始 update trampoline；独立手动授权后才调用已配置 getter，并支持退休、清空和 3 秒新鲜度
 - [x] 在 DevTools 后台线程用精确 ECS 布局验证刚捕获的 getter 候选：双向引用完整、对象快照未变化才报告结构一致
 - [ ] 从当前零售版 Minecraft 精确确认 ClientInstance::update/getLocalPlayer 的 ABI，并完成真实 Windows 游戏（多版本）回归
-- [ ] 游戏线程回调卸载竞态、多个 ClientInstance/分屏、世界退出时的指针代次与后验确认
+- [x] 禁用时保留 trampoline 并 PIN 模块至进程退出，BL v1 不支持卸载否决；多线程快照代次/非 owner 线程跳过
+- [ ] 多 ClientInstance/分屏、世界退出/换维度时的控制归属与 getter ABI 实机确认；不能保证热卸载
 - [ ] 需要精确验证 EntityContext/PlayerComponent 的客户端控制归属，不能把 getter 返回地址直接变成稳定 SDK 句柄
 - [ ] 根据客户端游戏线程和真实 ECS 注册表验证 PlayerComponent/ActorOwnerComponent，取得真正 LocalPlayer*
 - [ ] 反引用阶段由受信任的组件偏移数据驱动；避免当前启发式 RTTI 假阳性

@@ -211,3 +211,20 @@ cargo build --release --target x86_64-pc-windows-msvc
 CI 对 Windows x64/MSVC 进行单元测试、Release DLL 构建并上传完整 BL Mod 安装包。**编译通过不等于 Minecraft 实机中的内存扫描、窗口捕获和点击验证通过。**
 
 正式发布前仍需验证 Windows 原生显示、远程 RDP、UI 中文 IME、游戏窗口生命周期、读取与写入策略、模块卸载线程回收和游戏帧捕获。
+
+## 0.3.2+ 生命周期安全与跨版本符号验证
+
+**重要：第一次成功启用 ClientInstance Hook 后，DevTools DLL 会使用 Windows `GetModuleHandleExW(PIN | FROM_ADDRESS)` 固定至 Minecraft 进程结束。** 这是明确的生命周期取舍，并非普通的可热卸载 Hook：BLoader BL v1 的 `on_unload()` 没有返回值，不能拒绝宿主的模块卸载。仅检查回调计数为 0 也无法排除其他线程已取到旧 Detour 分支但尚未进入函数。
+
+- `stop` 禁止新采集、禁用游戏入口补丁并尝试排空当前回调。已经分配的 trampoline 不会通过 `remove_hook` 或 `uninitialize` 释放，DLL 不会热卸载；关闭游戏才彻底回收。
+- 停止后可在**同一版本和目标 RVA** 重新启用；不允许将仍被保留的 trampoline 复用到另一目标，必须重启游戏。若禁用失败或回调超时，保持保守状态并提示禁止热替换。
+- 仅首个观察到的 update 线程可发布快照和执行已单独授权的 getter；其他线程跳过采集并计数。快照使用代次一致性检查，检测内存复核期间发生的对象更新；这不是全局暂停世界或锁定 Actor 生命周期。
+- `client_lifecycle.json` 中的 `abi` 名称、模块 SHA-256、函数 RVA 和入口字节属于**人工审核输入**，无法自动证明实际 C++ ABI。实际 ClientInstance::update/getLocalPlayer 形参、返回值与虚函数入口，仍需按零售客户端构建进行逆向和实机验证。严禁直接套用 BDS、其他 Minecraft 版本或社区示例的偏移。
+- 所有地址继续作为 `candidate-only`，包括已通过三组件结构检查的 getter 返回值。进入/退出世界、换维度、重连、分屏及生命周期代次仍属待测。
+
+### 可参考的外部实现（只读证据来源，非可直接调用的 ABI）
+
+- [LeviLamina](https://github.com/LiteLDev/LeviLamina)：客户端接口头文件提供 `ClientInstance`/虚方法的结构线索，但不能把 BDS 侧符号/组件偏移直接用于 Windows 客户端。
+- [Flarial dll-oss](https://github.com/flarialmc/dll-oss)：版本化 signature/offset 映射及 ClientInstance 封装；符号命名或 C++ 声明不是本地版本的地址/调用约定证明。
+- [MCBE_DX12_ModBase](https://github.com/b01dev/MCBE_DX12_ModBase)：模式解析、Hook 和运行时 SDK 的实现参考，不把其特定客户端版本中的签名导入默认启用路径。
+
