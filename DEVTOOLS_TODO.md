@@ -1,4 +1,4 @@
-# DevTools 功能与正确性路线图（0.3.1）
+# DevTools 功能与正确性路线图（0.3.2）
 > 目标：完全由 DevTools.dll 实现原生调试与 AI 自动化；BLoader 只提供加载、卸载、日志。所有勾选以代码与 Windows 编译测试为依据，游戏实机结果单列记录。
 
 ## 当前已实现
@@ -32,7 +32,11 @@
 - [x] 当前游戏 EXE 哈希匹配的 ECS 指针偏移配置 + 双向引用结构检查
 - [ ] 多模块的签名自动生成/评分与兼容模块加载，当前仍需明确符号名和版本
 - [ ] 从客户端实际 EnTT/EntityContext/Registry 证据抽取组件偏移，不假设 BDS 与客户端布局相同
-- [ ] 核验 ClientInstance::update ABI 后安装安全 Hook，在真实游戏线程采集 this 并验证 getter 生命周期
+- [x] 实验性生命周期观察器：精确模块 SHA-256/RVA/完整入口指令核验，显式本地操作才安装 update Hook
+- [x] 回调只记录原子状态，调用原始 update trampoline；独立手动授权后才调用已配置 getter，并支持退休、清空和 3 秒新鲜度
+- [ ] 从当前零售版 Minecraft 精确确认 ClientInstance::update/getLocalPlayer 的 ABI，并完成真实 Windows 游戏（多版本）回归
+- [ ] 游戏线程回调卸载竞态、多个 ClientInstance/分屏、世界退出时的指针代次与后验确认
+- [ ] 需要精确验证 EntityContext/PlayerComponent 的客户端控制归属，不能把 getter 返回地址直接变成稳定 SDK 句柄
 - [ ] 根据客户端游戏线程和真实 ECS 注册表验证 PlayerComponent/ActorOwnerComponent，取得真正 LocalPlayer*
 - [ ] 反引用阶段由受信任的组件偏移数据驱动；避免当前启发式 RTTI 假阳性
 - [ ] 真实 Minecraft 本机、远程会话、不同构建的端到端数据验证

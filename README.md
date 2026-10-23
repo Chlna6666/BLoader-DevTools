@@ -1,6 +1,6 @@
 # BLoader DevTools
 
-版本：0.3.1 · 作者：Chlna6666 · GPL-3.0-only
+版本：0.3.2 · 作者：Chlna6666 · GPL-3.0-only
 
 项目：https://github.com/Chlna6666/BLoader-DevTools
 
@@ -65,6 +65,46 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 - MCP 新增 `devtools_state` 与 `devtools_navigate(tab="script")`：直接和 DevTools UI 线程交互，返回真实状态、切换工具页，避免依赖不可靠的后台点击。
 - 特征数据库写回改用 Windows 文件替换机制，避免第二次保存已有特征时文件重名失败。
 - 仍待实现完全可拖拽的 IntelliJ IDEA 停靠面板、CE AutoAssembler、硬件断点、指针扫描、真正 RenderDragon 帧捕获与跨版本 CFG/ABI 迁移；详见 [DEVTOOLS_TODO.md](DEVTOOLS_TODO.md)。
+
+
+## 0.3.2 ClientInstance 游戏线程生命周期观察（默认关闭）
+
+参考 2026-10-19 更新的 [b01dev/MCBE_DX12_ModBase](https://github.com/b01dev/MCBE_DX12_ModBase) 中 `ClientInstance::update(ClientInstance*, bool)` 回调获取 `this` 的方式。本功能为**经人工确认的目标构建专用实验性设施**，不是自动兼容 Minecraft 26.52 / 1.21 的万能偏移。参考项目的函数 ABI 不保证对当前所有版本适用。
+
+新增 `src/lifecycle.rs`，支持四层限制：
+
+1. **版本身份**：本地配置中的模块名、SHA-256、RVA 必须完全匹配实际 Windows 进程模块。
+2. **代码完整性**：要求 12–48 个完整机器码字节，使用 iced-x86 检查整条指令边界、可执行页及函数入口当前字节；拒绝已明显存在 JMP/INT3 补丁的入口。其他 Mod 仍可能通过非入口补丁 Hook，不能保证排除一切 Hook 冲突。
+3. **显式 UI 授权**：初始状态不安装；用户先勾选风险确认，再点击「启用 update 观察」。观察回调仅通过原子变量记录真实游戏更新线程、ClientInstance 候选、调用次数、最近 3 秒活跃状态；不分配、扫描内存、写日志或者操作 egui。
+4. **getter 独立授权**：需要在配置中另外给出同样严格验证的 getter 模块/入口字节与 `client_get_local_player_this_to_ptr` ABI。点击「单独启用 getter 调用」后才会在真实 `update` 游戏线程、原始 update 结束、ready 标志满足条件时调用目标 getter。用户必须先反汇编确认返回类型与 ABI，否则可能导致游戏崩溃。所得指针标记为 candidate-only。
+
+配置文件：`%LOCALAPPDATA%\BLoader-DevTools\client_lifecycle.json`。结构说明：
+
+```json
+{
+  "schema": 1,
+  "update": {
+    "module": "Minecraft.Windows.exe",
+    "sha256": "替换为真实模块完整64位sha256",
+    "rva": "0x人工验证的UpdateRVA",
+    "abi": "client_update_this_bool_to_bool",
+    "entry_bytes": "用当前函数前12至48个完整字节的空格分隔十六进制替换"
+  },
+  "getter": {
+    "module": "Minecraft.Windows.exe",
+    "sha256": "替换为真实模块完整64位sha256",
+    "rva": "0x人工验证的GetterRVA",
+    "abi": "client_get_local_player_this_to_ptr",
+    "entry_bytes": "用当前getter前12至48个完整字节的空格分隔十六进制替换"
+  }
+}
+```
+
+上述内容是**文档模板，不是可运行的真实版本配置**。getter 可省略或设为 null，此时只有 ClientInstance 观察功能。所有输入必须基于当前游戏 PE/PDB、汇编和实机确认。未知版本不会静默采用 Flarial 或其他客户端项目的旧偏移。
+
+通过 DevTools UI 的「本地玩家定位 → 游戏线程观察器」执行：校验配置 → 启用 update 观察 → 进入世界验证 callback/thread/this → （单独确认 getter ABI 后）启用 getter → 观察返回值 → 停止并清除。MCP `devtools_lifecycle(action="status"|"verify"|"stop")` 只能查询、核验或停止，不能远程启动 Hook / 启用 getter。启用后卸载 DLL 前必须通过本地「停止并清除」正常退休 trampoline；若返回错误，**不要热卸载**。
+
+当前**还没完成**：从当前零售版 Minecraft 自动发现并验证 `ClientInstance::update` 的签名/ABI；对真实 PlayerComponent 的 Client 控制归属核验；分屏、世界卸载和对象复用的强代次句柄；多 Mod 共存 Hook 冲突归因。该观察器并不直接对其他 Mod 提供持久 `LocalPlayer*` ABI。
 
 
 ## 0.3.1 多模块符号解析与版本化 ECS 校验

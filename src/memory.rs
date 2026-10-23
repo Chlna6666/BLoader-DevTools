@@ -151,6 +151,7 @@ pub enum Command {
         motion:crate::collision::Motion,
         profile:crate::collision::Profile,
     },
+    Lifecycle(crate::lifecycle::Action),
     SymbolInventory,
     ResolveSymbol {module:String,symbol:String,local_pdb:bool},
 }
@@ -346,6 +347,14 @@ impl ScanState{
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::Lifecycle(action)=>{
+                let mut report=Report::new("客户端生命周期观察器",self.kind);
+                match crate::lifecycle::execute(action){
+                    Ok(text)=>report.lines.push(text),
+                    Err(e)=>{report.ok=false;report.lines.push(e);}
+                }
+                report
+            },
             Command::SymbolInventory=>{
                 let mut r=Report::new("符号模块清单",self.kind);
                 match crate::symbols::inventory(){

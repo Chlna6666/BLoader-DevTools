@@ -12,6 +12,7 @@ mod collision;
 mod discovery;
 mod symbols;
 mod ecs_layout;
+mod lifecycle;
 mod mcp;
 mod capture;
 mod ui;
@@ -107,6 +108,12 @@ unsafe extern "system" fn on_load(host: *const BlHostPrefix) -> i32 {
 unsafe extern "system" fn on_unload() {
     info("[BLoader DevTools] Unloading: stopping MCP and UI worker...");
     mcp::stop();
+    match lifecycle::stop(){
+        Ok(message)=>info(format!("[BLoader DevTools] {message}")),
+        Err(message)=>error(format!(
+            "[BLoader DevTools] CRITICAL: failed to retire client hook before unload: {message}"
+        )),
+    }
     let _ = std::panic::catch_unwind(window::stop);
     info("[BLoader DevTools] UI worker stopped");
 }

@@ -210,6 +210,8 @@ pub struct Workbench {
     symbol_name:String,
     symbol_use_pdb:bool,
     symbol_status:Vec<String>,
+    lifecycle_status:Vec<String>,
+    lifecycle_acknowledged:bool,
 }
 impl Default for Workbench{
     fn default()->Self{
@@ -262,6 +264,8 @@ impl Default for Workbench{
             symbol_name:"ClientInstance::getLocalPlayer".into(),
             symbol_use_pdb:false,
             symbol_status:Vec::new(),
+            lifecycle_status:Vec::new(),
+            lifecycle_acknowledged:false,
         }
     }
 }
@@ -334,7 +338,17 @@ impl Workbench{
         self.tab=Tab::LocalPlayer;
         Ok(format!("已提交碰撞箱{}筛选；等待完成后读取结果",motion.label()))
     }
-    pub fn discover_player_for_ai(&mut self,profile:collision::Profile,budget:usize,
+    pub fn submit_lifecycle_for_ai(
+        &mut self,action:crate::lifecycle::Action
+    )->Result<String,String>{
+        if !matches!(action,crate::lifecycle::Action::Verify|crate::lifecycle::Action::Stop){
+            return Err("远程只能进行验证或停止观察器".into());
+        }
+        self.engine.submit(Command::Lifecycle(action))?;
+        self.tab=Tab::LocalPlayer;
+        Ok("已提交生命周期配置验证或停止任务，请通过 devtools_lifecycle(status) 查询实时状态并查看 DevTools 控制台确认结果".into())
+    }
+        pub fn discover_player_for_ai(&mut self,profile:collision::Profile,budget:usize,
         instance:Option<usize>)->Result<String,String>{
         let options=DiscoveryOptions{profile,budget_mib:budget,source_instance:instance}.validate()?;
         self.engine.submit(Command::DiscoverLocalPlayer(options))?;
@@ -438,6 +452,9 @@ impl Workbench{
                 for line in &report.lines {self.log(line.clone());}
             }
             match report.title.as_str(){
+                "客户端生命周期观察器"=>{
+                    self.lifecycle_status=report.lines.clone();
+                },
                 "符号模块清单"|"客户端符号解析"=>{
                     self.symbol_status=report.lines.clone();
                 },
@@ -663,6 +680,40 @@ impl Workbench{
         ui.heading("本地玩家 / LocalPlayer 定位向导");
         ui.label(RichText::new("开发常用路径：ClientInstance → getLocalPlayer() → LocalPlayer。此页只读，不调用未验证的游戏虚函数。")
             .color(self.muted()).small());
+        ui.add_space(8.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.strong("游戏线程 · ClientInstance 生命周期观察器（默认关闭）");
+            ui.label(RichText::new(
+                "只支持事先审查过的 client_lifecycle.json：EXE/DLL SHA-256、入口完整机器码、x64 ABI 必须一致。观察器仅在游戏 update 回调记录 this/线程 ID。")
+                .small().color(self.muted()));
+            ui.label(RichText::new("启用 getter 会在原生游戏 update 线程调用已指定的 C++ 函数，有导致游戏崩溃的风险；不要使用来自其他版本或未经反汇编审核的配置。")
+                .small().color(Color32::YELLOW));
+            ui.checkbox(&mut self.lifecycle_acknowledged,"已了解风险，确认只使用自己验证过的当前版本入口与 ABI");
+            ui.horizontal_wrapped(|ui|{
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("校验生命周期配置")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::Verify));
+                }
+                if ui.add_enabled(!self.engine.busy && self.lifecycle_acknowledged,
+                    egui::Button::new("启用 update 观察")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::Start));
+                }
+                if ui.add_enabled(!self.engine.busy && self.lifecycle_acknowledged,
+                    egui::Button::new("单独启用 getter 调用")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::EnableGetter));
+                }
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("停止并清除")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::Stop));
+                }
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("刷新结果")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::Status));
+                }
+            });
+            for line in self.lifecycle_status.iter().take(8){
+                ui.label(RichText::new(line).monospace().small());
+            }
+            ui.label(RichText::new("观察到的原始指针带 3 秒新鲜度，不缓存为其他 Mod 可直接使用的永久指针。卸载 DevTools 前必须先停止观察器。")
+                .small().color(self.muted()));
+        });
         ui.add_space(8.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
             ui.strong("模块符号 / Local PDB · 符号库按 SHA-256 精确匹配");

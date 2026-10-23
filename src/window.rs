@@ -669,6 +669,19 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     let result=workbench.discovery_status_for_ai();
                     let _=reply.send(result);
                 }
+                crate::mcp::UiCommand::Lifecycle(action,reply)=>{
+                    // Mutating actions run through Engine worker, not this UI
+                    // thread. Direct read-only status is handled in MCP.
+                    let result=match action{
+                        crate::lifecycle::Action::Verify|
+                        crate::lifecycle::Action::Stop=>{
+                            workbench.submit_lifecycle_for_ai(action)
+                        },
+                        _=>Err("MCP 不能通过 UI 队列启用 Hook".into()),
+                    };
+                    let _=reply.send(result);
+                    mark_dirty(None);
+                }
                 crate::mcp::UiCommand::PlayerRefine(motion,reply)=>{
                     let result=workbench.refine_discovered_for_ai(motion);
                     let _=reply.send(result);

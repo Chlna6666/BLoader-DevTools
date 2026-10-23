@@ -42,6 +42,7 @@ pub(crate) enum UiCommand {
     CollisionResults(usize,SyncSender<String>),
     PlayerDiscover(crate::discovery::Options,SyncSender<Result<String,String>>),
     PlayerReport(SyncSender<String>),
+    Lifecycle(crate::lifecycle::Action,SyncSender<Result<String,String>>),
     PlayerRefine(crate::collision::Motion,SyncSender<Result<String,String>>),
 }
 static UI_COMMANDS: Mutex<VecDeque<UiCommand>> = Mutex::new(VecDeque::new());
@@ -222,6 +223,13 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
                 "inputSchema":{"type":"object","properties":{"tab":{"type":"string"}},"required":["tab"]}
             },
             {
+                "name":"devtools_lifecycle",
+                "description":"管理已验证的游戏线程观察器：status 查询实时快照，verify 验证本地配置，stop 停止并清理。出于进程安全考虑，MCP 不允许启用 Hook 或调用 getter，必须在 DevTools 本地 UI 显式授权。",
+                "inputSchema":{"type":"object","properties":{
+                    "action":{"type":"string","enum":["status","verify","stop"]}
+                },"required":["action"]}
+            },
+            {
                 "name":"devtools_player_discover",
                 "description":"运行统一只读 Symbol Resolver→ECS Inspector→LocalPlayer Validator。扫描匹配宽高的 AABB，若提供 x/y/z 则回退到 Vec3 空间坐标；分析组件指针引用与 RTTI。结果只为候选，不能直接作为 LocalPlayer*。所有深度扫描均在独立后台线程。",
                 "inputSchema":{"type":"object","properties":{
@@ -374,6 +382,22 @@ fn call_tool(request:&Value) -> Value {
             if tab.len()>32{return Err("标签名称过长".into());}
             let result=ui_request(|reply|UiCommand::Navigate(tab.to_owned(),reply))??;
             return Ok(json!({"content":[{"type":"text","text":result}]}));
+        }
+        if name=="devtools_lifecycle" {
+            let command=match args["action"].as_str().unwrap_or(""){
+                "status"=>crate::lifecycle::Action::Status,
+                "verify"=>crate::lifecycle::Action::Verify,
+                "stop"=>crate::lifecycle::Action::Stop,
+                _=>return Err("MCP 仅允许 status/verify/stop；本地 UI 才能启用 Hook".into()),
+            };
+            // Status does not need to lock the egui UI; all hooks publish into
+            // atomics, with a short-lived control lock for state metadata.
+            let output=if command==crate::lifecycle::Action::Status {
+                crate::lifecycle::status()
+            }else{
+                ui_request(|reply|UiCommand::Lifecycle(command,reply))??
+            };
+            return Ok(json!({"content":[{"type":"text","text":output}]}));
         }
         if name=="devtools_player_discover" {
             let mut profile=crate::collision::Profile::default();
