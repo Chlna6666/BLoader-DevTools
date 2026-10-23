@@ -685,11 +685,11 @@ impl Workbench{
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
             ui.strong("游戏线程 · ClientInstance 生命周期观察器（默认关闭）");
             ui.label(RichText::new(
-                "只支持事先审查过的 client_lifecycle.json：EXE/DLL SHA-256、入口完整机器码、x64 ABI 必须一致。观察器仅在游戏 update 回调记录 this/线程 ID。")
+                "仅允许本机审核过的 client_lifecycle.json：精确模块 SHA-256、完整入口字节及人工确认 ABI。配置检查不能自动证明实际 C++ ABI。")
                 .small().color(self.muted()));
-            ui.label(RichText::new("启用 getter 会在原生游戏 update 线程调用已指定的 C++ 函数，有导致游戏崩溃的风险；不要使用来自其他版本或未经反汇编审核的配置。")
+            ui.label(RichText::new("首次启用 update Hook 会永久 PIN 当前 DevTools DLL 和 trampoline，直到 Minecraft 进程退出；停止观察也不能热卸载。getter 错误 ABI 可能使游戏崩溃。")
                 .small().color(Color32::YELLOW));
-            ui.checkbox(&mut self.lifecycle_acknowledged,"已了解风险，确认只使用自己验证过的当前版本入口与 ABI");
+            ui.checkbox(&mut self.lifecycle_acknowledged,"已了解无法热卸载和错误 ABI 的风险，并已人工确认当前构建");
             ui.horizontal_wrapped(|ui|{
                 if ui.add_enabled(!self.engine.busy,egui::Button::new("校验生命周期配置")).clicked(){
                     self.job(Command::Lifecycle(crate::lifecycle::Action::Verify));
@@ -702,7 +702,7 @@ impl Workbench{
                     egui::Button::new("单独启用 getter 调用")).clicked(){
                     self.job(Command::Lifecycle(crate::lifecycle::Action::EnableGetter));
                 }
-                if ui.add_enabled(!self.engine.busy,egui::Button::new("停止并清除")).clicked(){
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("停止观察（保留 DLL）")).clicked(){
                     self.job(Command::Lifecycle(crate::lifecycle::Action::Stop));
                 }
                 if ui.add_enabled(!self.engine.busy,egui::Button::new("刷新结果")).clicked(){
@@ -716,7 +716,7 @@ impl Workbench{
             for line in self.lifecycle_status.iter().take(8){
                 ui.label(RichText::new(line).monospace().small());
             }
-            ui.label(RichText::new("观察到的原始指针带 3 秒新鲜度，不缓存为其他 Mod 可直接使用的永久指针。卸载 DevTools 前必须先停止观察器。")
+            ui.label(RichText::new("采集地址仅为 3 秒内的候选，不构成稳定 LocalPlayer 身份。Hook 曾启用后本进程不支持安全热替换 DLL；请先停止观察，彻底回收需退出游戏。")
                 .small().color(self.muted()));
         });
         ui.add_space(8.);
