@@ -770,7 +770,7 @@ impl ScanState {
                                 r.lines.push("动态采样已取消".into());
                                 return r;
                             }
-                            std::thread::sleep((interval-start.elapsed())
+                            std::thread::sleep(interval.saturating_sub(start.elapsed())
                                 .min(std::time::Duration::from_millis(25)));
                         }
                     }
