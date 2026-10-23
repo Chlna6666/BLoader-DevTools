@@ -186,6 +186,7 @@ pub struct Workbench {
     show_inspector:bool,
     show_console:bool,
     layout_dirty:bool,
+    show_compact_inspector:bool,
     player_source:String,
     player_source_kind:SourceKind,
     player_access_vtable:bool,
@@ -240,6 +241,7 @@ impl Default for Workbench{
             show_explorer:layout.explorer_visible,
             show_inspector:layout.inspector_visible,
             show_console:layout.console_visible,layout_dirty:false,
+            show_compact_inspector:false,
             player_source:"0x0".into(),
             player_source_kind:SourceKind::DirectInstance,
             player_access_vtable:true,
@@ -518,16 +520,18 @@ impl Workbench{
             }
         }
         let viewport=ui.available_size();
-        let width=viewport.x.max(320.);
-        let height=viewport.y.max(320.);
-        let left=if self.show_explorer && width>630. {
-            self.left_width.clamp(130.,(width-300.).max(130.))
+        // Avoid fabricating a 320px canvas inside a smaller Win32 viewport.
+        let width=viewport.x.max(1.);
+        let height=viewport.y.max(1.);
+        let docked=self.show_inspector && width>=960.;
+        let left=if self.show_explorer && width>=640.{
+            self.left_width.clamp(130.,(width-if docked{590.}else{360.}).max(130.))
         }else{0.};
-        let right=if self.show_inspector && width>950. {
-            self.right_width.clamp(165.,(width-left-360.).max(165.))
+        let right=if docked{
+            self.right_width.clamp(165.,(width-left-400.).max(165.))
         }else{0.};
-        let bottom=if self.show_console {
-            self.bottom_height.clamp(90.,(height-190.).max(90.))
+        let bottom=if self.show_console && height>=320.{
+            self.bottom_height.clamp(90.,(height-210.).max(90.))
         }else{0.};
         // Primary toolbar / breadcrumb.
         ui.allocate_ui_with_layout(Vec2::new(width,43.),Layout::left_to_right(Align::Center),|ui|{
@@ -535,13 +539,19 @@ impl Workbench{
             ui.label(RichText::new("B").color(Color32::WHITE).strong().background_color(ACCENT).size(21.));
             ui.label(RichText::new("BLoader DevTools").strong().size(17.));
             ui.separator();
-            ui.label(RichText::new("Minecraft Bedrock").color(self.muted()));
-            ui.label(RichText::new(" / ").color(self.muted()));
-            ui.label(self.tab.name());
-            ui.label(RichText::new("Ctrl+1…9").small().color(self.muted()));
+            if width>=850.{
+                ui.label(RichText::new("Minecraft Bedrock").color(self.muted()));
+                ui.label(RichText::new(" / ").color(self.muted()));
+            }
+            if width>=680.{ui.label(self.tab.name());}
+            if width>=1160.{ui.label(RichText::new("Ctrl+1…9").small().color(self.muted()));}
             ui.menu_button("视图",|ui|{
                 if ui.checkbox(&mut self.show_explorer,"项目导航").changed(){self.layout_dirty=true;}
                 if ui.checkbox(&mut self.show_inspector,"地址检查器").changed(){self.layout_dirty=true;}
+                if width<960. && self.show_inspector && ui.button("浮动检查器").clicked(){
+                    self.show_compact_inspector=true;
+                    ui.close();
+                }
                 if ui.checkbox(&mut self.show_console,"底部控制台").changed(){self.layout_dirty=true;}
                 ui.separator();
                 if ui.button("恢复默认布局").clicked(){
@@ -557,13 +567,21 @@ impl Workbench{
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
-                if ui.button("设置").clicked(){self.tab=Tab::Settings;}
-                if self.engine.busy {ui.spinner();ui.label("后台任务中");if ui.button("取消任务").clicked(){self.engine.cancel();}}
-                else {ui.label(RichText::new("BL Mod  ·  就绪").color(GREEN));}
+                if width>=510. && ui.button("设置").clicked(){self.tab=Tab::Settings;}
+                if self.engine.busy{
+                    ui.spinner();
+                    if ui.button("取消").clicked(){self.engine.cancel();}
+                }else if width>=1030.{
+                    ui.label(RichText::new("BL Mod · 就绪").color(GREEN));
+                }
+                if self.show_inspector && width<960. &&
+                    ui.button("检查器").clicked(){
+                    self.show_compact_inspector=!self.show_compact_inspector;
+                }
             });
         });
         ui.separator();
-        let main_height=(height-bottom-97.).max(120.);
+        let main_height=(height-bottom-97.).max(16.);
         ui.allocate_ui_with_layout(Vec2::new(width,main_height),Layout::left_to_right(Align::Min),|ui|{
             if left>0.{
                 ui.allocate_ui_with_layout(Vec2::new(left,main_height),Layout::top_down(Align::Min),|ui|{
@@ -593,17 +611,14 @@ impl Workbench{
             });
         }
         // On narrow game windows keep the address inspector accessible.
-        if self.show_inspector && width<=850. {
+        if self.show_inspector && width<960. && self.show_compact_inspector {
             let mut open=true;
             let ctx=ui.ctx().clone();
             egui::Window::new("地址检查器")
                 .id(egui::Id::new("compact_inspector"))
                 .open(&mut open).resizable(true).default_width(275.)
                 .show(&ctx,|ui|self.inspector(ui));
-            if !open {
-                self.show_inspector=false;
-                self.layout_dirty=true;
-            }
+            if !open{self.show_compact_inspector=false;}
         }
         ui.separator();
         if self.layout_dirty && ui.input(|input|!input.pointer.any_down()){
@@ -655,10 +670,13 @@ impl Workbench{
         });
     }
     fn editor(&mut self,ui:&mut Ui){
-        ui.horizontal_wrapped(|ui|{
-            for tab in Tab::ALL{
-                if ui.selectable_label(self.tab==tab,tab.name()).clicked(){self.tab=tab;}
-            }
+        ScrollArea::horizontal().id_salt("editor_tabs")
+            .auto_shrink([false,true]).show(ui,|ui|{
+            ui.horizontal(|ui|{
+                for tab in Tab::ALL{
+                    if ui.selectable_label(self.tab==tab,tab.name()).clicked(){self.tab=tab;}
+                }
+            });
         });
         ui.separator();
         ScrollArea::vertical().id_salt("editor").auto_shrink([false,false]).show(ui,|ui|{
@@ -1369,21 +1387,32 @@ impl Workbench{
     fn bottom_panel(&mut self,ui:&mut Ui){
         ui.horizontal(|ui|{
             ui.add_space(7.);
-            ui.strong("工具窗口  /  控制台");
-            ui.label(RichText::new(format!("{} 条记录",self.console.len())).color(self.muted()).small());
+            ui.strong("控制台");
+            ui.label(RichText::new(format!("{} 条",self.console.len()))
+                .color(self.muted()).small());
+            if ui.small_button("复制全部").clicked(){
+                ui.ctx().copy_text(self.console.iter().map(String::as_str)
+                    .collect::<Vec<_>>().join("\n"));
+            }
             if ui.small_button("清空").clicked(){self.console.clear();}
             ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
-                ui.label(RichText::new("异步任务 · 调试日志 · 错误").color(self.muted()).small());
+                ui.label(RichText::new("可选中 · Ctrl+C 复制").small().color(self.muted()));
             });
         });
         ui.separator();
+        // Copyable/selectable multiline edit surface; any accidental edits
+        // affect only this frame's snapshot, not the canonical task history.
+        let mut snapshot=self.console.iter().map(String::as_str)
+            .collect::<Vec<_>>().join("\n");
         ScrollArea::vertical().id_salt("console").auto_shrink([false,false])
             .stick_to_bottom(true).show(ui,|ui|{
-                for line in &self.console{
-                    ui.label(RichText::new(line).monospace().size(12.));
-                }
+                ui.add(TextEdit::multiline(&mut snapshot)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(ui.available_width().max(80.))
+                    .frame(false));
             });
     }
+
 }
 
 #[cfg(test)]
