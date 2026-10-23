@@ -625,13 +625,24 @@ impl Workbench{
             self.persist_layout();
         }
         ui.horizontal(|ui|{
-            ui.add_space(10.);
-            ui.label(RichText::new(format!("BLoader DevTools v{}  ·  GPL-3.0-only",env!("CARGO_PKG_VERSION"))).color(self.muted()).small());
-            ui.separator();
-            ui.label(RichText::new(format!("候选：{}  ·  后台线程：{}",self.hits.len(),if self.engine.busy{"忙碌"}else{"空闲"})).color(self.muted()).small());
-            ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
-                ui.label(RichText::new("F8 可选 · 自动显示").color(self.muted()).small());
-            });
+            ui.add_space(8.);
+            ui.label(RichText::new(if width<540.{
+                format!("DevTools v{}",env!("CARGO_PKG_VERSION"))
+            }else{
+                format!("BLoader DevTools v{} · GPL-3.0",env!("CARGO_PKG_VERSION"))
+            }).color(self.muted()).small());
+            if width>=670.{
+                ui.separator();
+                ui.label(RichText::new(format!(
+                    "扫描候选 {} · 工作线程 {}",self.hits.len(),
+                    if self.engine.busy{"运行中"}else{"空闲"}
+                )).color(self.muted()).small());
+            }
+            if width>=1080.{
+                ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
+                    ui.label(RichText::new("F8 显示/隐藏").color(self.muted()).small());
+                });
+            }
         });
     }
     fn left_panel(&mut self,ui:&mut Ui){
