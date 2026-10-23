@@ -245,3 +245,10 @@ CI 对 Windows x64/MSVC 进行单元测试、Release DLL 构建并上传完整 B
 ### 控制台和反汇编安全性
 
 Win32 左键拖动时临时 SetCapture/ReleaseCapture，保证光标越过窗口边缘仍能继续产生鼠标移动事件；egui 控制台接近边缘拖选会持续滚动，松开后停止，选中后可 Ctrl+C 或复制全部。内存页会通过 VirtualQuery 标示保护属性；对不可执行堆/私有页拒绝反汇编，避免把包含指针的对象数据误解释成 x64 指令。
+
+
+### DevTools 默认窗口与只读 ClientInstance 数据
+
+UI 是游戏进程内部单独的原生顶层窗口（不是嵌入 Bedrock 客户端区域的子窗口，也没有外部 EXE），采用无焦点抢占的首次显示。成功的 D3D11 Present 仅代表渲染调用完成；不代表操作系统合成、游戏输入和前台可见性已在真实客户端验证。
+
+在本地 UI 审核并授权精确 SHA-256/ABI 的 update Hook 后，“只读检查 ClientInstance this / 虚表”可列出当前回调的临时指针、虚表归属及变化计数。该操作本身不执行任何 C++ 虚函数、不使用 EnTT，也不将候选对象当作已确认 LocalPlayer。

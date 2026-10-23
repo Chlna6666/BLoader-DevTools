@@ -737,6 +737,10 @@ impl Workbench{
                     self.job(Command::Lifecycle(crate::lifecycle::Action::Status));
                 }
                 if ui.add_enabled(!self.engine.busy,
+                    egui::Button::new("只读检查 ClientInstance this / 虚表")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::InspectInstance));
+                }
+                if ui.add_enabled(!self.engine.busy,
                     egui::Button::new("验证 Getter 对象 ECS 关系")).clicked(){
                     self.job(Command::Lifecycle(crate::lifecycle::Action::ValidatePlayer));
                 }

@@ -588,7 +588,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     let mut keep_running = true;
     while keep_running && running.load(Ordering::Acquire) &&
         unsafe { IsWindow(hwnd) != 0 } &&
-        true {
+        {
         let mut msg: MSG = unsafe { mem::zeroed() };
         while unsafe { PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
             if msg.message == WM_QUIT {
@@ -657,6 +657,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     // thread. Direct read-only status is handled in MCP.
                     let result=match action{
                         crate::lifecycle::Action::Verify|
+                        crate::lifecycle::Action::InspectInstance|
                         crate::lifecycle::Action::ValidatePlayer|
                         crate::lifecycle::Action::Stop=>{
                             workbench.submit_lifecycle_for_ai(action)

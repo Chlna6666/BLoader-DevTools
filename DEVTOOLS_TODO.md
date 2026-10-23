@@ -77,3 +77,12 @@
 3. DevTools 不能将扫描、Hook、MCP 或脚本执行依赖强加给 BLoader Core。
 4. 所有扫描、等待和深度分析在后台线程完成；取消需无死锁、无泄漏、不会误写游戏数据。
 5. 对无法验证的特性明确标注“实验性/未实现”，不能展示伪数据。
+
+## 0.3.2+：游戏窗口阻塞与 ClientInstance 验证
+
+- [x] 默认创建独立进程内 **WS_OVERLAPPEDWINDOW 顶层工具窗口**；不再将 D3D11 SwapChain 的 WS_CHILD 挂到游戏 Bedrock HWND，避免直接覆盖和接管 RenderDragon 输入。
+- [x] 启动采用 SW_SHOWNOACTIVATE，避免自动夺取 Minecraft 前台焦点；F8 显示/隐藏只操作 DevTools 自己的 HWND；UI_PRESENT_READY 不宣称窗口像素一定可见。
+- [x] 生命周期新增只读 `InspectInstance`：读取已人工授权 update 回调中的 `this` 首指针、虚表 slot0、映射模块与页面可执行属性，复核快照代次，并统计对象切换 / ready 参数变化。
+- [ ] **必须实机验收**：Minecraft 1.26.40.5 的新独立窗口可见、可最小化、不会阻塞游戏帧；多显示器、DX11/DX12、F8、复制/拖拽输入、关闭再显示。
+- [ ] 独立 UI 的真实 HWND 可见性与 RenderDragon 合成验证；零售客户端的 update/getLocalPlayer 调用 ABI 与本地玩家生命周期仍未被证明。
+
