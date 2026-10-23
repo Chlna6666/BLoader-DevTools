@@ -344,6 +344,32 @@ pub fn status()->String{
 #[cfg(test)]
 mod tests{
     use super::*;
+    unsafe extern "system" fn synthetic_update(this:*mut c_void,ready:bool)->bool{
+        !this.is_null() && ready
+    }
+    unsafe extern "system" fn synthetic_getter(this:*mut c_void)->*mut c_void{
+        this
+    }
+    #[test]fn observed_this_and_getter_are_separately_gated(){
+        let mut client=[1234usize,5678usize];
+        let this=client.as_mut_ptr().cast::<c_void>();
+        ORIGINAL.store(synthetic_update as usize,Ordering::Release);
+        ENABLED.store(true,Ordering::Release);
+        GETTER.store(0,Ordering::Release);
+        PLAYER.store(0,Ordering::Release);
+        assert!(unsafe{on_update(this,true)});
+        assert_eq!(INSTANCE.load(Ordering::Acquire),this as usize);
+        assert_eq!(PLAYER.load(Ordering::Acquire),0);
+        assert_ne!(THREAD_ID.load(Ordering::Acquire),0);
+        GETTER.store(synthetic_getter as usize,Ordering::Release);
+        assert!(!unsafe{on_update(this,false)});
+        assert_eq!(PLAYER.load(Ordering::Acquire),0);
+        assert!(unsafe{on_update(this,true)});
+        assert_eq!(PLAYER.load(Ordering::Acquire),this as usize);
+        assert_eq!(IN_FLIGHT.load(Ordering::Acquire),0);
+        clear_snapshot();
+        ORIGINAL.store(0,Ordering::Release);
+    }
     #[test]fn rejects_wrong_build_and_abi(){
         let hash="b".repeat(64);
         let raw=serde_json::json!({"schema":1,"update":{
