@@ -33,6 +33,12 @@ use windows_sys::Win32::{
 
 use crate::{ui::Workbench, info, warn, error};
 use windows_sys::Win32::Graphics::Gdi::ValidateRect;
+#[link(name="user32")]
+unsafe extern "system" {
+    fn SetCapture(hwnd:HWND)->HWND;
+    fn ReleaseCapture()->i32;
+}
+
 
 fn missing_resource() -> windows::core::Error {
     windows::core::Error::from(windows::core::HRESULT(0x80004005_u32 as i32))
