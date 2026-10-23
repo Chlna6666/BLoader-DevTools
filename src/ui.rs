@@ -1246,7 +1246,7 @@ impl Workbench{
     }
     fn script_editor(&mut self,ui:&mut Ui){
         ui.heading("脚本实验室");
-        ui.label(RichText::new("CE 风格研究脚本（安全 DSL）。支持 scan / next / read / disasm / aob / assert / wait / write / reset；assert 失败会中止后续操作。").color(self.muted()).small());
+        ui.label(RichText::new("CE 风格研究脚本（安全 DSL）。支持 scan / next / read / aabb_track / disasm / aob / assert / wait / write / reset；aabb_track 只读对比 2–12 个地址的多轮轨迹。").color(self.muted()).small());
         ui.add(TextEdit::multiline(&mut self.script).code_editor().desired_rows(12).desired_width(f32::INFINITY));
         ui.horizontal(|ui|{
             if ui.button("检查脚本语法").clicked(){
@@ -1274,6 +1274,8 @@ impl Workbench{
             }
             if ui.button("恢复示例").clicked(){self.script=crate::script::EXAMPLE.into();}
         });
+        ui.label(RichText::new("示例：aabb_track 12 700 0x地址1 0x地址2 …；参数为轮数、间隔毫秒和 2–12 个 4 字节对齐的 AABB 起点。最多 16 轮、30 秒，始终只读。")
+            .color(self.muted()).small());
         ui.label(RichText::new("仅用于有授权的离线游戏测试；写入不修改可执行页权限，不保证游戏状态一致性。").color(self.muted()).small());
     }
     fn migration_editor(&mut self,ui:&mut Ui){
