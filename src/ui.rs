@@ -324,7 +324,7 @@ impl Workbench{
             self.collision_coords=[p.x.to_string(),p.y.to_string(),p.z.to_string()];
         }
         self.collision_radius=profile.radius;
-        self.scan_budget=budget;
+        if budget!=0{self.scan_budget=budget;}
         self.tab=Tab::LocalPlayer;
         self.log("AI 已提交碰撞箱后台扫描；使用碰撞箱结果工具轮询完成状态");
         Ok("任务已提交，请轮询 devtools_collision_results 等待 busy=false".into())

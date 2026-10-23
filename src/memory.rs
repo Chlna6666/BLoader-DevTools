@@ -457,6 +457,8 @@ impl ScanState {
                 };
                 let mut hits=Vec::new();
                 let mut block_hits=Vec::new();
+                let mut scratch=vec![0u8;BLOCK];
+                let mut combined=Vec::with_capacity(BLOCK+crate::collision::AABB_BYTES-1);
                 let mut total_hits=0u64;
                 let mut reservoir_state=0x9E3779B97F4A7C15u64;
                 let mut bytes_scanned=0usize;
@@ -470,14 +472,15 @@ impl ScanState {
                         if self.cancel.load(Ordering::Acquire){cancelled=true;break 'regions;}
                         let size=(region.len-offset).min(BLOCK);
                         let addr=region.base+offset;
-                        match read(addr,size){
-                            Ok(block)=>{
-                                let mut data=overlap.clone();
-                                data.extend_from_slice(&block);
+                        match read_into(addr,&mut scratch[..size]){
+                            Ok(())=>{
+                                combined.clear();
+                                combined.extend_from_slice(&overlap);
+                                combined.extend_from_slice(&scratch[..size]);
                                 let base=addr-overlap.len();
                                 block_hits.clear();
-                                crate::collision::scan_bytes(base,&data,profile,
-                                    RESULT_LIMIT,&mut block_hits);
+                                crate::collision::scan_bytes(base,&combined,profile,
+                                    usize::MAX,&mut block_hits);
                                 for hit in block_hits.drain(..){
                                     if hit.address+crate::collision::AABB_BYTES<=addr{continue;}
                                     total_hits=total_hits.saturating_add(1);
@@ -488,8 +491,9 @@ impl ScanState {
                                     let slot=reservoir_state%total_hits;
                                     if slot<RESULT_LIMIT as u64{hits[slot as usize]=hit;}
                                 }
-                                let count=(crate::collision::AABB_BYTES-1).min(data.len());
-                                overlap=data[data.len()-count..].to_vec();
+                                let count=(crate::collision::AABB_BYTES-1).min(combined.len());
+                                overlap.clear();
+                                overlap.extend_from_slice(&combined[combined.len()-count..]);
                                 // Prevent overlap across discontiguous slices.
                                 // The next region may have unrelated address space.
                             }
