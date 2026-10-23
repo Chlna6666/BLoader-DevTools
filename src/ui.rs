@@ -195,7 +195,6 @@ pub struct Workbench {
     player_offset:String,
     player_candidate:Option<Candidate>,
     player_lines:Vec<String>,
-    player_index_hit:Option<usize>,
     player_profiles:Vec<String>,
     collision_hits:Vec<collision::Hit>,
     collision_width:f32,
@@ -251,7 +250,6 @@ impl Default for Workbench{
             player_offset:"0".into(),
             player_candidate:None,
             player_lines:Vec::new(),
-            player_index_hit:None,
             player_profiles:crate::project::local_player_recipes().unwrap_or_default(),
             collision_hits:Vec::new(),
             collision_width:0.6,
@@ -481,13 +479,8 @@ impl Workbench{
                     self.player_lines=report.lines.clone();
                     self.player_candidate=report.player_candidate.clone();
                 },
-                "本地玩家虚表索引特征"=>{
+                "客户端参考代码特征"=>{
                     self.player_lines=report.lines.clone();
-                    self.player_index_hit=report.index_candidate;
-                    if let Some(index)=report.index_candidate{
-                        self.player_access_vtable=true;
-                        self.player_offset=index.to_string();
-                    }
                 },
                 "首次精确扫描"|"再次扫描"|"游戏内特征扫描"|"脚本执行结果"=>{
                     self.hits=report.hits;
@@ -1021,20 +1014,14 @@ impl Workbench{
         });
         ui.add_space(8.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
-            ui.strong("第 1 步 · 定位 getLocalPlayer 虚表索引");
-            ui.label("参考已有客户端的已知特征，在当前游戏 EXE 可执行内存中寻找唯一匹配。");
-            if ui.add_enabled(!self.engine.busy,egui::Button::new("扫描参考特征（游戏主 EXE）")).clicked(){
-                self.job(Command::FindLocalPlayerIndex);
+            ui.strong("第 1 步 · 主模块代码特征：ClientInstance");
+            ui.label("参考 MCBE_DX12_ModBase 的 update/getLocalPlayer 两组完整 AOB，只扫描游戏 EXE 的 PE .text。");
+            if ui.add_enabled(!self.engine.busy,egui::Button::new("独立扫描 ClientInstance 代码特征")).clicked(){
+                self.job(Command::FindClientCodeSignatures);
             }
-            if ui.button("把参考特征复制到 AOB 工作区").clicked(){
-                self.aob=local_player::INDEX_REFERENCE_AOB.into();
-                self.tab=Tab::Signature;
-            }
-            if let Some(index)=self.player_index_hit{
-                ui.label(RichText::new(format!("候选虚表索引：{index}（尚未验证）"))
-                    .color(GREEN).strong());
-            }
-            ui.label(RichText::new("找不到匹配或匹配多项时，不猜测索引。其他游戏版本需重新验证。").small().color(self.muted()));
+            ui.label(RichText::new(
+                "静态 RVA 仅供人工反汇编复核。不会依据旧版虚表索引直接调用函数、自动 Hook 或确认 LocalPlayer。")
+                .color(self.muted()).small());
         });
         ui.add_space(12.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
