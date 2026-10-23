@@ -143,6 +143,7 @@ pub enum Command {
     Aob(String),
     AobRange(String,ScanOptions),
     Script(Vec<Command>),
+    TrackAabb{addresses:Vec<usize>,samples:usize,interval_ms:u64},
     Modules,
     Compare{old:String,new:String,pattern:String},
     Reset,
@@ -695,6 +696,127 @@ impl ScanState {
                 combined
             },
             Command::Reset => {self.hits.clear();Report::new("已重置扫描",self.kind)}
+            Command::TrackAabb{addresses,samples,interval_ms}=>{
+                let mut r=Report::new("AABB 六地址动态追踪",self.kind);
+                // These are private game pages, not LocalPlayer* or a registry.
+                // Enforce the bounds in the evaluator too (not just the DSL).
+                if !(2..=12).contains(&addresses.len()) ||
+                   !(2..=16).contains(&samples) ||
+                   !(100..=2000).contains(&interval_ms) ||
+                   ((samples-1) as u64)*interval_ms>30000 ||
+                   addresses.iter().any(|a|*a<0x10000||a%4!=0) {
+                    r.ok=false;
+                    r.lines.push("aabb_track 参数超出安全范围".into());
+                    return r;
+                }
+                let mut frames=Vec::<Vec<Option<crate::collision::Aabb>>>::with_capacity(samples);
+                let mut last=vec![None::<crate::collision::Aabb>;addresses.len()];
+                let mut distance=vec![(0f32,0f32);addresses.len()];
+                let mut failed=0usize;
+                r.lines.push(format!(
+                    "只读动态实验：{} 个地址，{} 轮，{}ms 间隔，约 {:.1}s；游戏进程内 ReadProcessMemory，不调用任何游戏函数、不写内存。",
+                    addresses.len(),samples,interval_ms,(samples-1) as f32*interval_ms as f32/1000.
+                ));
+                for round in 0..samples{
+                    if self.cancel.load(Ordering::Acquire){
+                        r.ok=false;r.lines.push("实验已取消；只保留已读取的结果".into());
+                        return r;
+                    }
+                    r.lines.push(format!("--- 第 {} / {} 轮 · t={}ms ---",
+                        round+1,samples,round as u64*interval_ms));
+                    let mut current=Vec::with_capacity(addresses.len());
+                    for (index,&addr) in addresses.iter().enumerate(){
+                        let bytes=read(addr,32);
+                        let value=bytes.as_ref().ok().and_then(|raw|{
+                            crate::collision::parse_aabb(raw)
+                        }).filter(|b|{
+                            let e=b.extent();
+                            b.finite() && e.x>0. && e.y>0. && e.z>0. &&
+                            e.x<=10. && e.y<=10. && e.z<=10.
+                        });
+                        if let Some(box3)=value{
+                            let c=box3.center();
+                            let e=box3.extent();
+                            if let Some(previous)=last[index]{
+                                let old=previous.center();
+                                let dx=c.x-old.x;let dz=c.z-old.z;
+                                distance[index].0+=(dx*dx+dz*dz).sqrt();
+                                distance[index].1+=(c.y-old.y).abs();
+                            }
+                            let metadata=bytes.as_ref().ok().map(|raw|{
+                                let width=f32::from_le_bytes(raw[24..28].try_into().unwrap());
+                                let height=f32::from_le_bytes(raw[28..32].try_into().unwrap());
+                                format!(" w/h={width:.3}/{height:.3}")
+                            }).unwrap_or_default();
+                            r.lines.push(format!(
+                                "#{:02} 0x{:X} center=({:.3},{:.3},{:.3}) extent=({:.3},{:.3},{:.3}){}",
+                                index+1,addr,c.x,c.y,c.z,e.x,e.y,e.z,metadata
+                            ));
+                            last[index]=Some(box3);
+                        }else{
+                            failed+=1;
+                            r.lines.push(format!("#{:02} 0x{:X} 无法读取或不符合正向有限 AABB",index+1,addr));
+                            last[index]=None;
+                        }
+                        current.push(value);
+                    }
+                    frames.push(current);
+                    if round+1<samples{
+                        let start=std::time::Instant::now();
+                        let interval=std::time::Duration::from_millis(interval_ms);
+                        while start.elapsed()<interval{
+                            if self.cancel.load(Ordering::Acquire){
+                                r.ok=false;
+                                r.lines.push("动态采样已取消".into());
+                                return r;
+                            }
+                            std::thread::sleep((interval-start.elapsed())
+                                .min(std::time::Duration::from_millis(25)));
+                        }
+                    }
+                }
+                r.lines.push(format!("--- 轨迹汇总：{} 轮，无法解析 {} 个地址样本 ---",samples,failed));
+                for (i,addr) in addresses.iter().enumerate(){
+                    r.lines.push(format!(
+                        "#{:02} 0x{:X} 累计水平位移={:.3} 累计垂直变化={:.3}",
+                        i+1,addr,distance[i].0,distance[i].1
+                    ));
+                }
+                let mut near_pairs=0;
+                for i in 0..addresses.len(){
+                    for j in i+1..addresses.len(){
+                        let mut comparable=0;
+                        let mut same=0;
+                        for frame in &frames {
+                            if let (Some(a),Some(b))=(frame[i],frame[j]){
+                                comparable+=1;
+                                let ca=a.center();let cb=b.center();
+                                let ea=a.extent();let eb=b.extent();
+                                let offset=(ca.x-cb.x).abs().max((ca.y-cb.y).abs())
+                                    .max((ca.z-cb.z).abs());
+                                let shape=(ea.x-eb.x).abs().max((ea.y-eb.y).abs())
+                                    .max((ea.z-eb.z).abs());
+                                if offset<=0.02 && shape<=0.02{same+=1;}
+                            }
+                        }
+                        if comparable>=2 && same*5>=comparable*4{
+                            near_pairs+=1;
+                            r.lines.push(format!(
+                                "近似同步 #{:02} ↔ #{:02}：{}/{} 次 AABB 中心/尺寸相近；地址间隔=0x{:X}",
+                                i+1,j+1,same,comparable,addresses[j].abs_diff(addresses[i])
+                            ));
+                        }
+                    }
+                }
+                r.lines.push(if near_pairs>0 {
+                    format!(
+                        "检测到 {near_pairs} 对近似同步 AABB。可能是同一运动状态的多个缓存/组件副本；不能据此认为存在多个玩家或确定 LocalPlayer 地址。"
+                    )
+                }else{
+                    "未检测到高度相同的 AABB 轨迹；可尝试加长采样，仍不能由 AABB 直接推断 Actor*。".into()
+                });
+                r
+            },
             Command::Read(address,len)=>{
                 let mut r=Report::new("十六进制查看",self.kind);
                 r.dump_base=address;
@@ -852,6 +974,21 @@ impl ScanState {
 mod tests{
     use super::*;
     #[test]fn parse_addresses(){assert_eq!(parse_address("0xAB_CD").unwrap(),0xABCD);}
+    #[test]fn track_aabb_reads_two_bounded_owned_buffers_without_writing(){
+        fn box_bytes(x:f32)->[u8;32]{
+            let vals=[x,70.0,10.0,x+0.6,71.8,10.6,0.6,1.8];
+            let mut out=[0u8;32];
+            for (i,n) in vals.iter().enumerate(){out[i*4..i*4+4].copy_from_slice(&n.to_le_bytes());}
+            out
+        }
+        let data=[box_bytes(14.0),box_bytes(14.0)];
+        let addresses=data.iter().map(|b|b.as_ptr() as usize).collect::<Vec<_>>();
+        let mut engine=ScanState::new(Arc::new(AtomicBool::new(false)));
+        let r=engine.execute(Command::TrackAabb{addresses,samples:2,interval_ms:100});
+        assert!(r.ok);
+        assert!(r.lines.iter().any(|s|s.contains("近似同步")));
+        assert!(r.lines.iter().any(|s|s.contains("0.600/1.800")));
+    }
     #[test]fn values(){assert_eq!(ValueKind::F32.encode("1.5").unwrap(),1.5f32.to_le_bytes());}
     #[test]fn large_u64_order_is_exact(){
         let lo=(1u64<<60).to_le_bytes();
