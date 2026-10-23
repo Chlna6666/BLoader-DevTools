@@ -207,7 +207,8 @@ unsafe extern "system" fn on_update(instance:*mut c_void,ready:bool)->bool{
         return false;
     }
     let callback:UpdateFn=unsafe{mem::transmute(original)};
-    let result=unsafe{callback(instance,ready)};
+    // Capture at function entry: the original update may destroy or replace
+    // the instance. This pointer is an observation, not a lifetime lease.
     if ENABLED.load(Ordering::Acquire) && !instance.is_null(){
         // Never serialize arbitrary game callbacks on a mutex. Only the first
         // observed update thread may publish a complete snapshot/invoke getter.
@@ -245,6 +246,8 @@ unsafe extern "system" fn on_update(instance:*mut c_void,ready:bool)->bool{
             CONCURRENT_SKIPS.fetch_add(1,Ordering::Relaxed);
         }
     }
+    // Call the original exactly once, after recording this update entry.
+    let result=unsafe{callback(instance,ready)};
     IN_FLIGHT.fetch_sub(1,Ordering::AcqRel);
     result
 }
