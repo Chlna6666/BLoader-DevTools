@@ -34,6 +34,8 @@ static CAPTURE_COUNT:AtomicU64=AtomicU64::new(0);
 static SNAPSHOT_SEQ:AtomicU64=AtomicU64::new(0);
 static SNAPSHOT_WRITER:AtomicBool=AtomicBool::new(false);
 static CONCURRENT_SKIPS:AtomicU64=AtomicU64::new(0);
+static INSTANCE_CHANGES:AtomicU64=AtomicU64::new(0);
+static READY_FLAG_CHANGES:AtomicU64=AtomicU64::new(0);
 static LAST_SEEN:AtomicU64=AtomicU64::new(0);
 static IS_READY:AtomicBool=AtomicBool::new(false);
 
@@ -174,7 +176,7 @@ fn pin_module_for_hook()->Result<(),String>{
 #[derive(Clone,Copy)]
 struct Captured{
     instance:usize,player:usize,thread:u32,ready:bool,last_seen:u64,
-    callbacks:u64,epoch:u64,
+    callbacks:u64,epoch:u64,instance_changes:u64,ready_flag_changes:u64,
 }
 fn capture_snapshot()->Option<Captured>{
     for _ in 0..8 {
@@ -187,6 +189,8 @@ fn capture_snapshot()->Option<Captured>{
             ready:IS_READY.load(Ordering::Acquire),
             last_seen:LAST_SEEN.load(Ordering::Acquire),
             callbacks:CAPTURE_COUNT.load(Ordering::Relaxed),
+            instance_changes:INSTANCE_CHANGES.load(Ordering::Relaxed),
+            ready_flag_changes:READY_FLAG_CHANGES.load(Ordering::Relaxed),
             epoch,
         };
         if SNAPSHOT_SEQ.load(Ordering::Acquire)==epoch{return Some(snap);}
@@ -219,6 +223,13 @@ unsafe extern "system" fn on_update(instance:*mut c_void,ready:bool)->bool{
                     (unsafe{getter(instance)}) as usize
                 }else{0};
                 SNAPSHOT_SEQ.fetch_add(1,Ordering::AcqRel); // odd: writer
+                if INSTANCE.load(Ordering::Acquire)!=instance as usize{
+                    INSTANCE_CHANGES.fetch_add(1,Ordering::Relaxed);
+                }
+                if CAPTURE_COUNT.load(Ordering::Relaxed)>0 &&
+                    IS_READY.load(Ordering::Acquire)!=ready{
+                    READY_FLAG_CHANGES.fetch_add(1,Ordering::Relaxed);
+                }
                 INSTANCE.store(instance as usize,Ordering::Release);
                 PLAYER.store(player,Ordering::Release);
                 THREAD_ID.store(thread,Ordering::Release);
@@ -356,6 +367,46 @@ pub fn stop()->Result<String,String>{
 }
 /// Check the captured getter result against the exact game EXE's ECS
 /// profile, on the DevTools worker (never in the hot game update detour).
+/// Passive inspection of a captured ClientInstance candidate. Never call any
+/// game function, infer ECS layout, or dereference a raw pointer directly.
+pub fn inspect_captured_instance()->Result<String,String>{
+    let active=CONTROL.lock().map_err(|_|"观察器控制锁中毒")?.active;
+    if !active{
+        return Err("观察器未启动；需在本地 UI 用精确版本/ABI 配置授权 update Hook".into());
+    }
+    let modules=symbols::modules()?;
+    let snapshot=capture_snapshot().ok_or("快照正在更新，请重试")?;
+    let age=unsafe{GetTickCount64()}.saturating_sub(snapshot.last_seen);
+    if snapshot.last_seen==0 || age>OBSERVATION_TTL_MS{
+        return Err("最近 3 秒内没有可靠的游戏 update 回调，拒绝过期指针".into());
+    }
+    let this=snapshot.instance;
+    if this<0x10000 || this&7!=0{
+        return Err("ClientInstance this 候选不符合最低地址/对齐要求".into());
+    }
+    // A first-word vtable is a C++ polymorphic-object heuristic only.
+    // ReadProcessMemory handles inaccessible pages but not object lifetimes.
+    let vtable=usize::from_le_bytes(memory::read(this,8)?
+        .try_into().map_err(|_|"对象首指针长度无效")?);
+    if vtable<0x10000 || vtable&7!=0{
+        return Err("候选对象首指针无法解释为有效虚表地址".into());
+    }
+    let slot0=usize::from_le_bytes(memory::read(vtable,8)?
+        .try_into().map_err(|_|"虚表条目长度无效")?);
+    let vtable_owner=modules.iter().find(|m|m.contains(vtable))
+        .map(|m|m.name.as_str()).unwrap_or("未知模块");
+    let method_owner=modules.iter().find(|m|m.contains(slot0))
+        .map(|m|m.name.as_str()).unwrap_or("未知模块");
+    let (page,executable)=memory::page_info(slot0)?;
+    if capture_snapshot().is_none_or(|after|after.epoch!=snapshot.epoch){
+        return Err("检查过程中游戏快照代次变化，结果作废".into());
+    }
+    Ok(format!(
+        "ClientInstance this 候选=0x{this:X}；vtable=0x{vtable:X} ({vtable_owner})；slot[0]=0x{slot0:X} ({method_owner})；可执行={executable}；{page}；update线程={}；ready参数={}；距回调={}ms；代次={}；this变化={}次；ready参数变化={}次。仅证明可读和模块归属，不能确认真实类型/Actor/LocalPlayer，绝不执行虚函数。",
+        snapshot.thread,snapshot.ready,age,snapshot.epoch,
+        snapshot.instance_changes,snapshot.ready_flag_changes
+    ))
+}
 pub fn validate_captured_player()->Result<String,String>{
     let (active,getter)=CONTROL.lock()
         .map(|c|(c.active,c.getter!=0))
@@ -394,7 +445,7 @@ pub fn validate_captured_player()->Result<String,String>{
         snapshot.epoch,evidence.owner_component,evidence.player_component,evidence.shape_component))
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Action {Verify, Start, EnableGetter, Stop, Status, ValidatePlayer}
+pub enum Action {Verify, Start, EnableGetter, Stop, Status, InspectInstance, ValidatePlayer}
 impl Action {
     pub fn from_str(value:&str)->Result<Self,String>{
         match value{
@@ -403,8 +454,9 @@ impl Action {
             "enable_getter"=>Ok(Self::EnableGetter),
             "stop"=>Ok(Self::Stop),
             "status"=>Ok(Self::Status),
+            "inspect_instance"=>Ok(Self::InspectInstance),
             "validate_player"=>Ok(Self::ValidatePlayer),
-            _=>Err("支持 verify/start/enable_getter/stop/status/validate_player".into()),
+            _=>Err("支持 verify/start/enable_getter/stop/status/inspect_instance/validate_player".into()),
         }
     }
 }
@@ -415,6 +467,7 @@ pub fn execute(action:Action)->Result<String,String>{
         Action::EnableGetter=>enable_verified_getter(),
         Action::Stop=>stop(),
         Action::Status=>Ok(status()),
+        Action::InspectInstance=>inspect_captured_instance(),
         Action::ValidatePlayer=>validate_captured_player(),
     }
 }
@@ -430,13 +483,15 @@ pub fn status()->String{
     let player=if fresh && getter{snapshot.map_or(0,|s|s.player)}else{0};
     let last_seen=snapshot.map_or(0,|s|if s.last_seen==0 {0}
         else{now.saturating_sub(s.last_seen)});
-    format!("observer={} getter_enabled={} module_pinned={} patch_disabled={} in_flight={} concurrent_skips={} callbacks={} snapshot_epoch={} callback_thread={} ready={} last_seen_ms={} fresh={} ClientInstance_candidate=0x{:X} LocalPlayer_candidate=0x{:X}; candidate-only, world unload invalidates pointers",
+    format!("observer={} getter_enabled={} module_pinned={} patch_disabled={} in_flight={} concurrent_skips={} callbacks={} snapshot_epoch={} callback_thread={} ready={} this_changes={} ready_flag_changes={} last_seen_ms={} fresh={} ClientInstance_candidate=0x{:X} LocalPlayer_candidate=0x{:X}; candidate-only, world unload invalidates pointers",
         active,getter,pinned,patch_disabled,IN_FLIGHT.load(Ordering::Acquire),
         CONCURRENT_SKIPS.load(Ordering::Relaxed),
         snapshot.map_or(0,|s|s.callbacks),
         snapshot.map_or(0,|s|s.epoch),
         snapshot.map_or(0,|s|s.thread),
         snapshot.is_some_and(|s|s.ready),
+        snapshot.map_or(0,|s|s.instance_changes),
+        snapshot.map_or(0,|s|s.ready_flag_changes),
         last_seen,fresh,instance,player)
 }
 #[cfg(test)]
@@ -466,6 +521,8 @@ mod tests{
         assert_eq!(PLAYER.load(Ordering::Acquire),this as usize);
         assert_eq!(IN_FLIGHT.load(Ordering::Acquire),0);
         let before=capture_snapshot().unwrap();
+        assert!(before.instance_changes>=1);
+        assert!(before.ready_flag_changes>=2);
         let ptr=this as usize;
         // A non-owner thread must never invoke the version-pinned getter.
         let other=std::thread::spawn(move||unsafe{on_update(ptr as *mut c_void,true)});
