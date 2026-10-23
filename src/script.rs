@@ -35,6 +35,26 @@ pub fn parse(source:&str,allow_writes:bool)->Result<Vec<Command>,String>{
             ["next",f]=>Command::Refine(filter(f)?,"".into()),
             ["next","exact",value]=>Command::Refine(Filter::Exact,(*value).to_owned()),
             ["read",address,len]=>Command::Read(parse_address(address)?,len.parse().map_err(|_|"read 长度必须为整数")?),
+            ["aabb_track",count,interval,addresses @ ..]=>{
+                let samples=count.parse::<usize>().map_err(|_|"aabb_track 采样轮数必须是整数")?;
+                let interval_ms=interval.parse::<u64>().map_err(|_|"aabb_track 间隔必须为毫秒整数")?;
+                if !(2..=16).contains(&samples) || !(100..=2000).contains(&interval_ms) ||
+                    (samples as u64-1)*interval_ms>30000 {
+                    return Err("aabb_track 要求 2–16 轮、100–2000ms 间隔、总时长不超过 30 秒".into());
+                }
+                if !(2..=12).contains(&addresses.len()){
+                    return Err("aabb_track 必须提供 2–12 个 AABB 起始地址".into());
+                }
+                let mut addrs=Vec::with_capacity(addresses.len());
+                for text in addresses {
+                    let address=parse_address(text)?;
+                    if address<0x10000 || address%4!=0 || addrs.contains(&address){
+                        return Err(format!("aabb_track 地址必须 >=0x10000、4 字节对齐且不重复：{text}"));
+                    }
+                    addrs.push(address);
+                }
+                Command::TrackAabb{addresses:addrs,samples,interval_ms}
+            },
             ["assert",address,t,value]=>Command::Assert{
                 address:parse_address(address)?,
                 kind:kind(t)?,expected:(*value).into()
@@ -77,6 +97,15 @@ mod tests{
         assert!(parse("write 0x100000 f32 90 70",true).is_ok());
     }
     #[test]fn script_parses(){assert_eq!(parse(EXAMPLE,false).unwrap().len(),2);}
+    #[test]fn aabb_track_is_read_only_and_bounded(){
+        let cmd="aabb_track 12 700 0x212567FC038 0x212567FC638 0x212567FCC38 0x212567FD238 0x212567FD838 0x212567FDE38";
+        let parsed=parse(cmd,false).unwrap();
+        assert!(matches!(&parsed[0],Command::TrackAabb{addresses,samples:12,interval_ms:700} if addresses.len()==6));
+        assert!(parse("aabb_track 16 2000 0x10000 0x10600",false).is_ok());
+        assert!(parse("aabb_track 16 2001 0x10000 0x10600",false).is_err());
+        assert!(parse("aabb_track 2 100 0x10000 0x10000",false).is_err());
+        assert!(parse("aabb_track 0 100 0x10000 0x10600",false).is_err());
+    }
     #[test]fn script_assert_and_wait(){
         let commands=parse("assert 0x20000 f32 90\nwait 100",false).unwrap();
         assert_eq!(commands.len(),2);
