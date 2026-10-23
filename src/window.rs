@@ -680,7 +680,11 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
             let dirty = mem::take(&mut state.dirty);
             (state.visible, dirty, mem::take(&mut state.events))
         });
-        if visible && dirty {
+        // Minimized/hidden DevTools must not submit a Present or compete with
+        // RenderDragon. WM_SIZE/WM_PAINT schedules the first restored frame.
+        if visible && dirty &&
+            unsafe{IsWindowVisible(hwnd)}!=0 &&
+            unsafe{IsIconic(hwnd)}==0 {
             let mut rect: RECT = unsafe { mem::zeroed() };
             if unsafe { GetClientRect(hwnd, &mut rect) } != 0 {
                 let width = (rect.right - rect.left).max(0) as u32;
@@ -705,7 +709,15 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                             Ok(captured) => {
                                 if !first_frame_logged {
                                     first_frame_logged = true;
-                                    info("[BLoader DevTools] UI_PRESENT_READY: first D3D11 Present succeeded; standalone window visibility still requires OS compositor verification");
+                                    info("[BLoader DevTools] UI_PRESENT_READY: first D3D11 Present succeeded");
+                                    let os_visible=unsafe{IsWindowVisible(hwnd)}!=0;
+                                    let minimized=unsafe{IsIconic(hwnd)}!=0;
+                                    let actual_parent=unsafe{GetParent(hwnd)};
+                                    info(format!(
+                                        "[BLoader DevTools] UI_WINDOW_STATE visible={} minimized={} parent=0x{:X} foreground={} (visual compositor/gameplay not yet verified)",
+                                        os_visible,minimized,actual_parent as usize,
+                                        unsafe{GetForegroundWindow()}==hwnd
+                                    ));
                                 }
                                 if let Some(result) = captured {
                                     for responder in pending_captures.drain(..) {
@@ -751,4 +763,18 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
         UnregisterClassW(WINDOW_CLASS.as_ptr(), instance);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    #[test]
+    fn game_window_is_not_the_default_ui_parent(){
+        // Regression guard: a large WS_CHILD over Bedrock consumed input and
+        // could block rendering. The tool must use its own native top-level.
+        let style=WS_OVERLAPPEDWINDOW;
+        assert_eq!(style&WS_CHILD,0);
+        assert_eq!(style&WS_OVERLAPPEDWINDOW,WS_OVERLAPPEDWINDOW);
+        assert_ne!(WS_EX_APPWINDOW,0);
+    }
 }
