@@ -10,6 +10,7 @@ mod inspection;
 mod local_player;
 mod collision;
 mod discovery;
+mod code_signatures;
 mod symbols;
 mod ecs_layout;
 mod lifecycle;

@@ -35,6 +35,7 @@ pub struct SymbolEvidence {
     pub image_size:usize,
     pub matches:Vec<usize>,
     pub index:Option<usize>,
+    pub update_matches:Vec<usize>,
     pub status:String,
 }
 #[derive(Debug,Clone)]
@@ -137,56 +138,34 @@ fn find_reference_matches(base:usize,bytes:&[u8],pattern:&Pattern,out:&mut Vec<u
 
 fn scan_symbol(cancel:&AtomicBool)->SymbolEvidence{
     let mut evidence=SymbolEvidence{
-        base:0,image_size:0,matches:Vec::new(),index:None,status:String::new(),
+        base:0,image_size:0,matches:Vec::new(),index:None,
+        update_matches:Vec::new(),status:String::new(),
     };
-    let (start,size)=match inspection::main_image_range(){
-        Ok(range)=>range,
-        Err(e)=>{evidence.status=format!("主模块枚举失败：{e}");return evidence;}
+    let (base,size)=match inspection::main_image_range(){
+        Ok(v)=>v,Err(e)=>{evidence.status=format!("游戏主模块定位失败：{e}");return evidence;}
     };
-    evidence.base=start;
+    evidence.base=base;
     evidence.image_size=size;
-    let signature=match Pattern::parse(local_player::INDEX_REFERENCE_AOB){
-        Ok(p)=>p,Err(e)=>{evidence.status=e.into();return evidence;}
-    };
-    // Do not stop after the first AOB hit. Ambiguity must be reported.
-    let mut overlap=Vec::new();
-    let mut prev_end=0usize;
-    let mut processed=0usize;
-    for r in regions(false,true,start,start.saturating_add(size)){
-        if cancel.load(Ordering::Acquire){evidence.status="符号扫描已取消".into();return evidence;}
-        let mut offset=0usize;
-        while offset<r.len && processed<512*1024*1024 {
-            if cancel.load(Ordering::Acquire){evidence.status="符号扫描已取消".into();return evidence;}
-            let n=(r.len-offset).min(BLOCK);
-            let address=r.base+offset;
-            match memory::read(address,n){
-                Ok(bytes)=>{
-                    if prev_end!=address{overlap.clear();}
-                    let mut combined=overlap.clone();
-                    combined.extend_from_slice(&bytes);
-                    let base=address-overlap.len();
-                    find_reference_matches(base,&combined,&signature,&mut evidence.matches);
-                    let copy=(signature.0.len()-1).min(combined.len());
-                    overlap=combined[combined.len()-copy..].to_vec();
-                    prev_end=address+n;
+    match crate::code_signatures::scan(base,size,cancel){
+        Ok(found)=>{
+            evidence.matches=found.getter;
+            evidence.update_matches=found.update;
+            let format_rvas=|hits:&[usize]|{
+                if hits.is_empty(){"无".to_owned()}else{
+                    hits.iter().take(4).map(|ptr|format!("0x{:X}",ptr-base))
+                        .collect::<Vec<_>>().join(",")
                 }
-                Err(_)=>{overlap.clear();prev_end=0;}
-            }
-            processed+=n;
-            offset+=n;
-            if evidence.matches.len()>=MAX_SYMBOL_MATCHES{break;}
+            };
+            evidence.status=format!(
+                "PE .text 扫描 {:.1} MiB, 读取失败={}；ModBase 参考 update={} [RVA {}]；getLocalPlayer={} [RVA {}]{}。仅静态候选，未验证 ABI/版本，不会调用",
+                found.scanned_bytes as f64/1048576.,found.read_failures,
+                evidence.update_matches.len(),format_rvas(&evidence.update_matches),
+                evidence.matches.len(),format_rvas(&evidence.matches),
+                if found.capped{"；命中超过保留上限"}else{""}
+            );
         }
-        if evidence.matches.len()>=MAX_SYMBOL_MATCHES||processed>=512*1024*1024{break;}
+        Err(e)=>evidence.status=format!("PE .text 特征扫描失败：{e}"),
     }
-    if evidence.matches.len()==1 {
-        evidence.index=local_player::get_index_at(evidence.matches[0]).ok();
-    }
-    evidence.status=match (evidence.matches.len(),evidence.index){
-        (0,_)=>"参考符号未匹配：当前客户端可能重构，不能从旧 AOB 推断 getter".into(),
-        (1,Some(n))=>format!("参考指令唯一匹配；候选虚表索引={n}，还需要确认 ClientInstance 和 ABI"),
-        (1,None)=>"字节特征命中，但指令解码失败；未确认符号".into(),
-        _=>format!("参考特征命中 {} 项，存在歧义；拒绝自动选择",evidence.matches.len()),
-    };
     evidence
 }
 fn vec3_at(bytes:&[u8])->Option<Vec3>{
@@ -729,7 +708,7 @@ mod tests {
         let seed=Seed{address:0x20000,kind:SeedKind::Vec3Position,
             position:Vec3{x:1.,y:2.,z:3.},distance:0.};
         let symbol=SymbolEvidence{base:0,image_size:0,matches:Vec::new(),index:None,
-            status:"missing".into()};
+            update_matches:Vec::new(),status:"missing".into()};
         let result=validate(seed,Vec::new(),&symbol,None);
         assert_eq!(result.confidence,"仅几何/位置候选");
         assert!(result.status.contains("没有游戏线程 getter"));

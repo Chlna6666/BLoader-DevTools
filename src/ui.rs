@@ -847,12 +847,12 @@ impl Workbench{
             });
             if let Some((address,base))=candidate_symbol {
                 ui.horizontal(|ui|{
-                    if ui.small_button("反汇编候选符号").clicked(){
+                    if ui.small_button("反汇编参考 getter 候选").clicked(){
                         self.address=format!("0x{address:X}");
                         self.tab=Tab::Disasm;
                         self.job(Command::Disassemble(address,32));
                     }
-                    if ui.small_button("复制候选 RVA（未验证）").clicked(){
+                    if ui.small_button("复制 getter 候选 RVA（未验证）").clicked(){
                         ui.ctx().copy_text(format!("0x{:X}",address.saturating_sub(base)));
                     }
                 });
@@ -864,7 +864,7 @@ impl Workbench{
             }
             if let Some(report)=&self.discovery_report{
                 ui.separator();
-                ui.strong(format!("符号定位：{}",report.symbol.status));
+                ui.strong(format!("参考代码特征（未验证）：{}",report.symbol.status));
                 ui.label(format!(
                     "进程可写内存覆盖 {:.2}%（读 {:.1} / {:.1} MiB） · 读取失败 {} · 保留候选 {}",
                     if report.eligible_bytes>0 {100.*report.scanned_bytes as f64/report.eligible_bytes as f64}else{0.},
