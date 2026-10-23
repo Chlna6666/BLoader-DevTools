@@ -712,6 +712,28 @@ impl Workbench{
             }
             ui.label(RichText::new("无论是否命中：仅凭 RTTI、引用链或空间位置都不能证明本地玩家身份，未取得游戏线程 getter 结果前不会导出 Actor*。")
                 .small().color(self.muted()));
+            let candidate_symbol=self.discovery_report.as_ref().and_then(|report|{
+                (report.symbol.matches.len()==1).then(||
+                    (report.symbol.matches[0],report.symbol.base)
+                )
+            });
+            if let Some((address,base))=candidate_symbol {
+                ui.horizontal(|ui|{
+                    if ui.small_button("反汇编候选符号").clicked(){
+                        self.address=format!("0x{address:X}");
+                        self.tab=Tab::Disasm;
+                        self.job(Command::Disassemble(address,32));
+                    }
+                    if ui.small_button("复制候选 RVA（未验证）").clicked(){
+                        ui.ctx().copy_text(format!("0x{:X}",address.saturating_sub(base)));
+                    }
+                });
+            }
+            if let Some(report)=&self.discovery_report {
+                if ui.small_button("复制完整分析报告").clicked(){
+                    ui.ctx().copy_text(discovery::summarise(report));
+                }
+            }
             if let Some(report)=&self.discovery_report{
                 ui.separator();
                 ui.strong(format!("符号定位：{}",report.symbol.status));
