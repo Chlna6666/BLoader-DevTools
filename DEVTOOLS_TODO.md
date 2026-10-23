@@ -26,7 +26,7 @@
 - [x] Symbol Resolver：主 EXE 可执行页参考 AOB 搜索、唯一匹配与 x64 虚表索引解析；可选 ClientInstance 候选的只读 getter 入口检查
 - [x] ECS Inspector：MEM_PRIVATE 可写内存容量与覆盖率诊断、跨区域采样；可选玩家 HUD XYZ 的 AABB + Vec3 位置双路径初筛
 - [x] ECS Inspector：优先候选的指针反向引用查询、MSVC x64 RTTI 启发式 Actor/Player 类型线索
-- [x] LocalPlayer Validator：空间/结构/引用/RTTI 分级证据，所有结果保持候选身份；没有 getter 结果时禁止假称已定位
+- [x] LocalPlayer Validator：空间/结构/引用/RTTI 分级证据，及连续行为采样筛选；空筛选不销毁上一轮快照，未经过 getter 校验不得假称已定位
 - [x] UI 和 MCP：一键统一后台分析、覆盖率/引用报告、取消支持
 - [ ] GameAssembly/多模块扫描与 PDB/已确认符号映射、独立符号版本数据库
 - [ ] 根据客户端游戏线程和真实 ECS 注册表验证 PlayerComponent/ActorOwnerComponent，取得真正 LocalPlayer*

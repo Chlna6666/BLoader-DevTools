@@ -64,6 +64,7 @@ pub struct Report {
     pub failed_reads:usize,
     pub cancelled:bool,
     pub messages:Vec<String>,
+    pub validation_rounds:u32,
 }
 #[derive(Debug,Clone,Copy)]
 pub struct Options {
@@ -435,7 +436,7 @@ pub fn run(options:Options,cancel:&AtomicBool)->Result<Report,String>{
     }
     if cancel.load(Ordering::Acquire){
         return Ok(Report{build_id,symbol,seeds:Vec::new(),inspected:Vec::new(),
-            scanned_bytes:0,eligible_bytes:0,failed_reads:0,cancelled:true,messages});
+            scanned_bytes:0,eligible_bytes:0,failed_reads:0,cancelled:true,messages,validation_rounds:0});
     }
     let budget=options.budget_mib*1024*1024;
     let (seeds,scanned,eligible,failed)=collect_geometry(options.profile,budget,cancel);
@@ -464,10 +465,82 @@ pub fn run(options:Options,cancel:&AtomicBool)->Result<Report,String>{
     messages.push("LocalPlayer Validator：尚未安全获取当前游戏线程的 getLocalPlayer 返回值，所有结果均为候选，禁止自动导出 Actor*。".into());
     Ok(Report{build_id,symbol,seeds,inspected,scanned_bytes:scanned,
         eligible_bytes:eligible,failed_reads:failed,
-        cancelled:cancel.load(Ordering::Acquire),messages})
+        cancelled:cancel.load(Ordering::Acquire),messages,validation_rounds:0})
 }
+
+/// Recheck a captured spatial snapshot after the operator has moved/jumped.
+/// Read-only memory samples; the validator cannot establish client ownership.
+pub fn motion_match(old:&Seed,new:Vec3,motion:collision::Motion)->bool{
+    let old_center=old.position;
+    let previous=collision::Aabb{min:old_center,max:old_center};
+    let next=collision::Aabb{min:new,max:new};
+    motion.accepts(previous,next)
+}
+fn sample_seed(seed:&Seed,profile:Profile)->Option<Vec3>{
+    match seed.kind{
+        SeedKind::Aabb=>{
+            let bytes=memory::read(seed.address,collision::AABB_BYTES).ok()?;
+            let aabb=collision::parse_aabb(&bytes)?;
+            let shape=Profile{feet_hint:None,..profile};
+            shape.matches(aabb).then_some(aabb.center())
+        }
+        SeedKind::Vec3Position=>{
+            let bytes=memory::read(seed.address,12).ok()?;
+            vec3_at(&bytes)
+        }
+    }
+}
+pub fn refine(previous:&Report,motion:collision::Motion,profile:Profile,
+    cancel:&AtomicBool)->Result<Report,String>{
+    let profile=profile.validate()?;
+    let mut updated=previous.clone();
+    updated.messages=Vec::new();
+    if previous.seeds.is_empty(){
+        updated.messages.push("无可筛选候选：请先执行统一发现并尽可能提供玩家 HUD 坐标".into());
+        return Ok(updated);
+    }
+    let mut survivors=Vec::new();
+    for seed in &previous.seeds{
+        if cancel.load(Ordering::Acquire){
+            updated.cancelled=true;
+            updated.messages.push("行为验证已取消；保留此前所有候选".into());
+            return Ok(updated);
+        }
+        if let Some(position)=sample_seed(seed,profile){
+            if motion_match(seed,position,motion){
+                let mut next=seed.clone();
+                next.position=position;
+                survivors.push(next);
+            }
+        }
+    }
+    if survivors.is_empty(){
+        updated.messages.push(format!(
+            "动作「{}」未筛出候选：可能采样时机不正确、玩家尚未移动或结构变更；保留旧快照，避免全部丢失",
+            motion.label()));
+        return Ok(updated);
+    }
+    updated.validation_rounds=updated.validation_rounds.saturating_add(1);
+    updated.messages.push(format!(
+        "LocalPlayer Validator 第 {} 轮：动作={}，空间候选 {}→{}；仍未经过客户端 getter 身份校验",
+        updated.validation_rounds,motion.label(),previous.seeds.len(),survivors.len()));
+    updated.seeds=survivors;
+    updated.inspected=Vec::new();
+    for candidate in updated.seeds.iter().take(5){
+        if cancel.load(Ordering::Acquire){updated.cancelled=true;return Ok(previous.clone());}
+        let links=collect_links(candidate,32*1024*1024,cancel);
+        let mut verified=validate(candidate.clone(),links,&updated.symbol);
+        verified.score+=updated.validation_rounds.min(4)*8;
+        verified.status.push_str("；与人工操作后的运动变化吻合（不代表游戏本地控制身份）");
+        updated.inspected.push(verified);
+    }
+    updated.inspected.sort_by(|a,b|b.score.cmp(&a.score));
+    Ok(updated)
+}
+
 pub fn summarise(report:&Report)->String{
     let mut lines=report.messages.clone();
+    lines.push(format!("行为验证有效轮次={}；身份确认=未完成",report.validation_rounds));
     if report.cancelled{lines.push("操作被取消，结果不应视为完整扫描".into());}
     if let Some(build)=&report.build_id{lines.push(format!("游戏 EXE 身份：{build}"));}
     for (index,item) in report.inspected.iter().enumerate(){
@@ -532,7 +605,14 @@ mod tests {
         assert_eq!(targets.get(&0x20000),Some(&128));
         assert_eq!(targets.get(&0x20080),Some(&0));
     }
-    #[test]fn blocks_false_localplayer_confirmation(){
+    #[test]fn motion_validation_uses_position_change(){
+        let seed=Seed{address:0x20000,kind:SeedKind::Vec3Position,
+            position:Vec3{x:1.,y:64.,z:1.},distance:0.};
+        assert!(motion_match(&seed,Vec3{x:3.,y:64.,z:1.},collision::Motion::Horizontal));
+        assert!(!motion_match(&seed,Vec3{x:1.,y:64.,z:1.},collision::Motion::Horizontal));
+        assert!(motion_match(&seed,Vec3{x:1.,y:65.,z:1.},collision::Motion::Jumped));
+    }
+        #[test]fn blocks_false_localplayer_confirmation(){
         let seed=Seed{address:0x20000,kind:SeedKind::Vec3Position,
             position:Vec3{x:1.,y:2.,z:3.},distance:0.};
         let symbol=SymbolEvidence{base:0,image_size:0,matches:Vec::new(),index:None,

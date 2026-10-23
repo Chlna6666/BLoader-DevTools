@@ -343,6 +343,14 @@ impl Workbench{
         self.collision_radius=profile.radius;
         Ok("已提交 Symbol Resolver → ECS Inspector → LocalPlayer Validator；用 devtools_player_report 轮询（任何结果只作为候选）。".into())
     }
+    pub fn refine_discovered_for_ai(&mut self,motion:Motion)->Result<String,String>{
+        if self.discovery_report.is_none(){return Err("尚无统一发现候选，请先完成统一分析".into());}
+        let mut profile=self.collision_profile()?;
+        profile.feet_hint=None;
+        self.engine.submit(Command::RefineDiscoveredPlayer{motion,profile})?;
+        self.collision_motion=motion;
+        Ok(format!("已提交行为验证（{}）；请稍后读取 devtools_player_report",motion.label()))
+    }
     pub fn discovery_status_for_ai(&mut self)->String{
         self.poll();
         match &self.discovery_report{
@@ -422,7 +430,7 @@ impl Workbench{
                 for line in &report.lines {self.log(line.clone());}
             }
             match report.title.as_str(){
-                "统一本地玩家分析"=>{
+                "统一本地玩家分析"|"统一定位行为验证"=>{
                     self.discovery_report=report.discovery;
                 },
                 "玩家碰撞箱首次扫描"|"玩家碰撞箱动态筛选"=>{
@@ -669,6 +677,30 @@ impl Workbench{
                         }
                         Err(e)=>self.log(format!("分析参数错误：{e}")),
                     }
+                }
+            });
+            ui.horizontal_wrapped(|ui|{
+                egui::ComboBox::from_id_salt("discovery-motion")
+                    .selected_text(self.collision_motion.label()).show_ui(ui,|ui|{
+                        for kind in Motion::ALL {
+                            ui.selectable_value(&mut self.collision_motion,kind,kind.label());
+                        }
+                    });
+                if ui.add_enabled(!self.engine.busy &&
+                        self.discovery_report.as_ref().is_some_and(|r|!r.seeds.is_empty()),
+                        egui::Button::new("动作完成后进行行为验证")).clicked(){
+                    match self.collision_profile(){
+                        Ok(mut profile)=>{
+                            profile.feet_hint=None;
+                            self.job(Command::RefineDiscoveredPlayer{
+                                motion:self.collision_motion,profile,
+                            });
+                        }
+                        Err(e)=>self.log(format!("行为验证参数错误：{e}")),
+                    }
+                }
+                if let Some(report)=&self.discovery_report {
+                    ui.label(format!("已验证 {} 轮",report.validation_rounds));
                 }
             });
             if self.collision_use_coords {

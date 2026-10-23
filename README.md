@@ -74,13 +74,16 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 ~~~text
 devtools_player_discover(x=玩家X, y=玩家脚底Y, z=玩家Z, radius=3, budget_mib=256)
 devtools_player_report()
+# 玩家在游戏里走动/跳跃后：
+devtools_player_refine(motion="horizontal")
+devtools_player_report()
 ~~~
 
 **第一阶段（Symbol Resolver）**：针对进程主 EXE 的可执行页扫描旧版 getLocalPlayer 参考 AOB，核查唯一匹配及指令编码，并解析虚表索引。它不是 PDB 自动解析，也不能证明新的客户端版本存在相同 getter。已知 ClientInstance 指针可作为可选输入，用于进一步只读检查 getter 入口。
 
 **第二阶段（ECS Inspector）**：枚举真实可写 MEM_PRIVATE 区域，以有限预算跨区域采样，并记录扫描 MiB / 总可读私有区 MiB 及覆盖百分比。尝试 24 字节 AABB，同时在提供玩家世界坐标时匹配独立 Vec3 浮点位置结构，不再假设所有客户端都把 AABB 按六个 float32 连续存放。选择最近的空间候选后，查找引用该内存位置附近结构的指针槽，启发式检查邻近 MSVC C++ RTTI。
 
-**第三阶段（LocalPlayer Validator）**：按空间距离、形状、指针引用和 RTTI 给出解释性候选与证据。即使 RTTI 包含 Player，也仍缺少 ClientInstance::getLocalPlayer() 的正确游戏线程返回值验证，不能标记为已确认 LocalPlayer，也不能输出可调用的 Actor* 给普通 Mod。引用链和 RTTI 不一定存在。此阶段目前只提供只读启发式校验，不调用游戏函数或安装 Hook。
+**第三阶段（LocalPlayer Validator）**：按空间距离、形状、指针引用和 RTTI 给出解释性候选与证据。支持首次分析后采样玩家动作，选择「水平走动」「跳跃」等行为进行再次验证，对上次的 AABB/Vec3 地址读取新位置、缩小候选；如果本次筛选为空则保留原快照供重试。即使 RTTI 包含 Player，也仍缺少 ClientInstance::getLocalPlayer() 的正确游戏线程返回值验证，不能标记为已确认 LocalPlayer，也不能输出可调用的 Actor* 给普通 Mod。引用链和 RTTI 不一定存在。此阶段目前只提供只读启发式校验，不调用游戏函数或安装 Hook。
 
 为什么原扫描可能为 0：128 MiB 只是有限读取预算，不是整个游戏堆；原始算法按可读区域排序抽样，且只匹配 AABB 连续 minXYZ,maxXYZ 布局。某些构建把位置、尺寸和 AABB 放在不同 ECS 组件，或使用不同对象姿态。建议在游戏显示坐标后填入精确 XYZ，使工具同时进行 Vec3 检索。提高预算不等于必然能定位玩家。
 

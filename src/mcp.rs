@@ -42,6 +42,7 @@ pub(crate) enum UiCommand {
     CollisionResults(usize,SyncSender<String>),
     PlayerDiscover(crate::discovery::Options,SyncSender<Result<String,String>>),
     PlayerReport(SyncSender<String>),
+    PlayerRefine(crate::collision::Motion,SyncSender<Result<String,String>>),
 }
 static UI_COMMANDS: Mutex<VecDeque<UiCommand>> = Mutex::new(VecDeque::new());
 
@@ -234,6 +235,13 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
                 }}
             },
             {
+                "name":"devtools_player_refine",
+                "description":"玩家已在游戏中完成走动或跳跃后，重新读取统一定位快照并验证位置变化。仅保留与动作吻合的 ECS/Vec3 候选，不宣称已取得 LocalPlayer*。",
+                "inputSchema":{"type":"object","properties":{
+                    "motion":{"type":"string","enum":["moved","horizontal","jumped","stationary"]}
+                },"required":["motion"]}
+            },
+            {
                 "name":"devtools_player_report",
                 "description":"获取统一分析的后台任务状态、真实扫描覆盖率、符号候选、ECS 引用和 RTTI 验证证据。没有游戏线程 getter 的身份验证时只返回候选。",
                 "inputSchema":{"type":"object","properties":{}}
@@ -393,6 +401,17 @@ fn call_tool(request:&Value) -> Value {
                 source_instance:client_instance,
             }.validate()?;
             let result=ui_request(|reply|UiCommand::PlayerDiscover(options,reply))??;
+            return Ok(json!({"content":[{"type":"text","text":result}]}));
+        }
+        if name=="devtools_player_refine" {
+            let motion=match args["motion"].as_str().unwrap_or(""){
+                "moved"=>crate::collision::Motion::Moved,
+                "horizontal"=>crate::collision::Motion::Horizontal,
+                "jumped"=>crate::collision::Motion::Jumped,
+                "stationary"=>crate::collision::Motion::Stationary,
+                _=>return Err("motion 可选 moved/horizontal/jumped/stationary".into()),
+            };
+            let result=ui_request(|reply|UiCommand::PlayerRefine(motion,reply))??;
             return Ok(json!({"content":[{"type":"text","text":result}]}));
         }
         if name=="devtools_player_report" {

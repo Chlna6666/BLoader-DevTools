@@ -147,6 +147,10 @@ pub enum Command {
     ScanPlayerAabb {profile:crate::collision::Profile,options:ScanOptions},
     RefinePlayerAabb {profile:crate::collision::Profile,motion:crate::collision::Motion},
     DiscoverLocalPlayer(crate::discovery::Options),
+    RefineDiscoveredPlayer{
+        motion:crate::collision::Motion,
+        profile:crate::collision::Profile,
+    },
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -326,13 +330,41 @@ impl Drop for Engine {
         if let Some(handle)=self.handle.take(){let _=handle.join();}
     }
 }
-struct ScanState { hits:Vec<Hit>,kind:ValueKind,cancel:Arc<AtomicBool>,player_hitboxes:Vec<crate::collision::Hit> }
+struct ScanState {
+    hits:Vec<Hit>,kind:ValueKind,cancel:Arc<AtomicBool>,
+    player_hitboxes:Vec<crate::collision::Hit>,
+    last_discovery:Option<crate::discovery::Report>,
+}
 impl ScanState{
-    fn new(cancel:Arc<AtomicBool>)->Self{Self{hits:Vec::new(),kind:ValueKind::F32,cancel,player_hitboxes:Vec::new()}}
+    fn new(cancel:Arc<AtomicBool>)->Self{
+        Self{hits:Vec::new(),kind:ValueKind::F32,cancel,
+            player_hitboxes:Vec::new(),last_discovery:None}
+    }
 }
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::RefineDiscoveredPlayer{motion,profile}=>{
+                let mut report=Report::new("统一定位行为验证",self.kind);
+                let Some(previous)=self.last_discovery.as_ref() else {
+                    report.ok=false;
+                    report.lines.push("请先完成统一定位初始扫描".into());
+                    return report;
+                };
+                match crate::discovery::refine(previous,motion,profile,&self.cancel){
+                    Ok(verified)=>{
+                        report.ok=!verified.cancelled;
+                        report.lines=crate::discovery::summarise(&verified).lines()
+                            .map(str::to_owned).collect();
+                        if !verified.cancelled{
+                            self.last_discovery=Some(verified.clone());
+                        }
+                        report.discovery=Some(verified);
+                    }
+                    Err(e)=>{report.ok=false;report.lines.push(e);}
+                }
+                report
+            },
             Command::DiscoverLocalPlayer(options)=>{
                 let mut report=Report::new("统一本地玩家分析",self.kind);
                 match crate::discovery::run(options,&self.cancel){
@@ -340,6 +372,9 @@ impl ScanState {
                         report.ok=!evidence.cancelled;
                         report.lines=crate::discovery::summarise(&evidence).lines()
                             .map(str::to_owned).collect();
+                        if !evidence.cancelled {
+                            self.last_discovery=Some(evidence.clone());
+                        }
                         report.discovery=Some(evidence);
                     },
                     Err(e)=>{report.ok=false;report.lines.push(e);}
