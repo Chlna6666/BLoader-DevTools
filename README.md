@@ -240,3 +240,8 @@ CI 对 Windows x64/MSVC 进行单元测试、Release DLL 构建并上传完整 B
 ### 游戏模块代码特征（实验性）
 
 统一玩家定位现在只读扫描主模块 PE .text，分别报告 update / getLocalPlayer 两种参考 AOB 的候选 RVA 和命中数量。来源：b01dev/MCBE_DX12_ModBase，src/minecraft/bedrock_memory.h（MIT，© 2026 Binary01）。此功能不会自动 Hook、调用 getter 或认定本地玩家。旧版本特征可能不适用于当前 SHA-256 的 Minecraft 客户端；0 命中时须以实机二进制继续分析。
+
+
+### 控制台和反汇编安全性
+
+Win32 左键拖动时临时 SetCapture/ReleaseCapture，保证光标越过窗口边缘仍能继续产生鼠标移动事件；egui 控制台接近边缘拖选会持续滚动，松开后停止，选中后可 Ctrl+C 或复制全部。内存页会通过 VirtualQuery 标示保护属性；对不可执行堆/私有页拒绝反汇编，避免把包含指针的对象数据误解释成 x64 指令。

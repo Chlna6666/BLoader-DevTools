@@ -149,6 +149,8 @@ pub struct Workbench {
     pub hide_requested:bool,
     engine:Engine,
     console:VecDeque<String>,
+    console_drag_scrolling:bool,
+    console_selecting:bool,
     hits:Vec<Hit>,
     module_lines:Vec<String>,
     result_lines:Vec<String>,
@@ -220,6 +222,7 @@ impl Default for Workbench{
         Self {
             tab:Tab::Memory,hide_requested:false,engine:Engine::start(),
             console:VecDeque::from(["DevTools 工作区已就绪；扫描、解析和脚本在专用后台线程运行。".into()]),
+            console_drag_scrolling:false,console_selecting:false,
             hits:Vec::new(),module_lines:Vec::new(),result_lines:Vec::new(),
             dump:Vec::new(),dump_base:0,value_kind:ValueKind::F32,
             scan_value:"90".into(),filter:Filter::Exact,address:"0x0".into(),
@@ -395,7 +398,10 @@ impl Workbench{
         }
         text
     }
-    pub fn needs_poll(&self)->bool{self.engine.busy || (!self.watches.is_empty() && self.watch_due.elapsed()>=Duration::from_millis(700))}
+    pub fn needs_poll(&self)->bool{
+        self.console_drag_scrolling || self.engine.busy ||
+        (!self.watches.is_empty() && self.watch_due.elapsed()>=Duration::from_millis(700))
+    }
     fn line(&self)->Color32{if self.dark{LINE}else{Color32::from_rgb(213,223,233)}}
     fn panel(&self)->Color32{if self.dark{PANEL}else{Color32::WHITE}}
     fn muted(&self)->Color32{if self.dark{MUTED}else{Color32::from_rgb(83,96,113)}}
@@ -1427,11 +1433,35 @@ impl Workbench{
         // affect only this frame's snapshot, not the canonical task history.
         let mut snapshot=self.console.iter().map(String::as_str)
             .collect::<Vec<_>>().join("\n");
+        let selecting=self.console_selecting;
         ScrollArea::vertical().id_salt("console").auto_shrink([false,false])
-            .stick_to_bottom(true).show(ui,|ui|{
-                ui.add(TextEdit::multiline(&mut snapshot)
+            // Never snap to new output while the operator is selecting text.
+            .stick_to_bottom(!selecting).show(ui,|ui|{
+                let clip=ui.clip_rect();
+                let response=ui.add(TextEdit::multiline(&mut snapshot)
                     .font(egui::TextStyle::Monospace)
                     .desired_width(ui.available_width().max(80.)));
+                let dragging=ui.input(|input|input.pointer.primary_down()) &&
+                    (response.dragged() || selecting);
+                self.console_selecting=dragging;
+                let pointer=ui.input(|input|input.pointer.interact_pos());
+                let mut scroll=0f32;
+                if dragging {
+                    if let Some(p)=pointer {
+                        if p.x>=clip.left()-32. && p.x<=clip.right()+32. {
+                            const EDGE:f32=20.;
+                            if p.y<clip.top()+EDGE {
+                                scroll=(clip.top()+EDGE-p.y).clamp(12.,96.);
+                            }else if p.y>clip.bottom()-EDGE {
+                                scroll=-(p.y-clip.bottom()+EDGE).clamp(12.,96.);
+                            }
+                        }
+                    }
+                }
+                self.console_drag_scrolling=scroll!=0.;
+                if scroll!=0. {
+                    ui.scroll_with_delta(egui::vec2(0.,scroll));
+                }
             });
     }
 

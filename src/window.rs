@@ -133,6 +133,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_SETFOCUS => mark_dirty(Some(Event::WindowFocused(true))),
         WM_KILLFOCUS => mark_dirty(Some(Event::WindowFocused(false))),
         WM_SIZE => mark_dirty(None),
+        WM_CAPTURECHANGED => {
+            // OS revoked mouse capture while a selection was in progress.
+            // Do not retain a stale egui dragging pointer.
+            mark_dirty(Some(Event::PointerGone));
+        }
         WM_MOUSEMOVE => {
             let pos = pointer(lp);
             INPUT.with(|cell| cell.borrow_mut().mouse = pos);
@@ -149,10 +154,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP => {
             let pressed = msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN;
-            if pressed {
-                // The child window receives normal Win32 mouse focus.
-            } else {
-                // No global/raw-input capture is installed.
+            if msg==WM_LBUTTONDOWN {
+                // Capture only mouse drag in this DevTools window. Without it,
+                // Win32 stops dispatching WM_MOUSEMOVE past the client edge and
+                // egui cannot extend selection/auto-scroll the console.
+                unsafe{SetCapture(hwnd);}
             }
             let pos = pointer(lp);
             mark_dirty(Some(Event::PointerButton {
@@ -163,6 +169,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 pressed,
                 modifiers: modifiers(),
             }));
+            if msg==WM_LBUTTONUP {
+                unsafe{ReleaseCapture();}
+            }
         }
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let pressed = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;

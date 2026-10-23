@@ -205,6 +205,30 @@ pub(crate) fn read_into(address:usize,bytes:&mut [u8])->Result<(),String>{
     }
     Ok(())
 }
+/// Classify an address before interpreting data as x64 instructions.
+pub fn page_info(address:usize)->Result<(String,bool),String>{
+    let mut info:MEMORY_BASIC_INFORMATION=unsafe{mem::zeroed()};
+    if unsafe{VirtualQuery(address as *const c_void,&mut info,
+        mem::size_of::<MEMORY_BASIC_INFORMATION>())}==0{
+        return Err(format!("VirtualQuery 无法查询 0x{address:X}"));
+    }
+    let type_name=match info.Type{
+        windows_sys::Win32::System::Memory::MEM_PRIVATE=>"MEM_PRIVATE(堆/私有)",
+        windows_sys::Win32::System::Memory::MEM_IMAGE=>"MEM_IMAGE(模块映像)",
+        windows_sys::Win32::System::Memory::MEM_MAPPED=>"MEM_MAPPED(映射)",
+        _=>"其他/未提交",
+    };
+    let committed=info.State==MEM_COMMIT;
+    let executable=committed && info.Protect&(PAGE_GUARD|PAGE_NOACCESS)==0 &&
+        matches!(info.Protect&0xff,PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|
+            PAGE_EXECUTE_WRITECOPY|0x10);
+    Ok((format!(
+        "内存页 0x{:X}–0x{:X}；{}；state=0x{:X} protection=0x{:X}；可执行={}",
+        info.BaseAddress as usize,
+        (info.BaseAddress as usize).saturating_add(info.RegionSize),
+        type_name,info.State,info.Protect,executable
+    ),executable))
+}
 pub fn read(address:usize,size:usize)->Result<Vec<u8>,String>{
     if size==0||size>BLOCK{return Err("读取长度非法".into());}
     let mut bytes=vec![0;size];
@@ -681,6 +705,7 @@ impl ScanState {
             Command::Read(address,len)=>{
                 let mut r=Report::new("十六进制查看",self.kind);
                 r.dump_base=address;
+                if let Ok((page,_))=page_info(address){r.lines.push(page);}
                 match read(address,len.min(4096)){
                     Ok(data)=>{r.dump=data;r.lines.push(format!("已读取 {} 字节",r.dump.len()))}
                     Err(e)=>{r.ok=false;r.lines.push(e);}
@@ -688,6 +713,17 @@ impl ScanState {
             }
             Command::Disassemble(address,count)=>{
                 let mut r=Report::new("反汇编",self.kind);
+                match page_info(address){
+                    Ok((page,enabled))=>{
+                        r.lines.push(page);
+                        if !enabled{
+                            r.ok=false;
+                            r.lines.push("拒绝将非可执行内存当成机器码：此处可能是指针/结构体，请在十六进制视图检查。代码特征只应在主模块 .text 查询。".into());
+                            return r;
+                        }
+                    }
+                    Err(e)=>{r.ok=false;r.lines.push(e);return r;}
+                }
                 match read(address,(count.clamp(1,128)*15).min(2048)){
                     Ok(bytes)=>{
                         let mut decoder=iced_x86::Decoder::with_ip(64,&bytes,address as u64,iced_x86::DecoderOptions::NONE);
