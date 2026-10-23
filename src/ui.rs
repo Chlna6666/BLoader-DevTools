@@ -707,7 +707,7 @@ impl Workbench{
 
     fn localplayer_editor(&mut self,ui:&mut Ui){
         ui.heading("本地玩家 / LocalPlayer 定位向导");
-        ui.label(RichText::new("开发常用路径：ClientInstance → getLocalPlayer() → LocalPlayer。此页只读，不调用未验证的游戏虚函数。")
+        ui.label(RichText::new("优先采集 ClientInstance::update 的 this，再检查 getter 与 ECS。默认只读；只有本地单独授权后才允许调用人工审核的 getter，未经验证的 ABI 仍有崩溃风险。")
             .color(self.muted()).small());
         ui.add_space(8.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
