@@ -233,3 +233,5 @@ CI 对 Windows x64/MSVC 进行单元测试、Release DLL 构建并上传完整 B
 ## 进程内存完整遍历（实验性）
 
 统一 LocalPlayer 分析的扫描预算设为 **0** 时，DevTools DLL 使用 `VirtualQuery + ReadProcessMemory(GetCurrentProcess())` 分块遍历本进程所有已提交可写页（包括 MEM_PRIVATE / MEM_MAPPED / MEM_IMAGE），不再限制 1024 MiB。可取消、块缓存复用；命中超出 1536 项时继续遍历并均匀保留代表性样本。使用非零 MiB 仍为抽样模式。若版本化符号和 ECS 组件身份缺失，遍历全部进程内存也不能确认 LocalPlayer。
+
+碰撞箱独立入口也可选择“完整进程扫描”，MCP `devtools_collision_scan(budget_mib=0)` 同样有效；普通数值扫描仍保留 MiB 上限。保留候选容量不等于真实命中总数，所有命中均只是空间特征，绝不等同于 LocalPlayer 身份。

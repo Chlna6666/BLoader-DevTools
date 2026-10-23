@@ -54,6 +54,17 @@ impl ScanOptions{
         }
         Ok(self)
     }
+    /// Collision inspection may traverse all committed writable pages when
+    /// budget_mib == 0; generic numeric scans retain their explicit cap.
+    pub fn validate_collision(self)->Result<Self,String>{
+        if self.start<0x10000||self.end<=self.start{
+            return Err("碰撞箱扫描起止地址无效".into());
+        }
+        if self.budget_mib!=0 && !(16..=MAX_SCAN_MIB).contains(&self.budget_mib){
+            return Err("碰撞箱扫描预算必须为 0 或 16–1024 MiB".into());
+        }
+        Ok(self)
+    }
     fn byte_limit(self)->usize{self.budget_mib*1024*1024}
 }
 const BLOCK:usize = 256*1024;
@@ -273,6 +284,14 @@ fn collision_regions(options:ScanOptions)->Vec<Region>{
         }
         address=next;
     }
+    if options.budget_mib==0{
+        // Deterministic full traversal includes every committed writable
+        // image/mapped/private region in the configured address range.
+        let mut all=candidates.into_iter().map(|(region,_)|region)
+            .collect::<Vec<_>>();
+        all.sort_unstable_by_key(|r|r.base);
+        return all;
+    }
     // Prefer private heap and larger pages, then round-robin sample ranges.
     // Very large allocations must not monopolize the entire scan budget.
     candidates.sort_unstable_by(|a,b|{
@@ -430,13 +449,16 @@ impl ScanState {
             },
             Command::ScanPlayerAabb{profile,options}=>{
                 let mut report=Report::new("玩家碰撞箱首次扫描",self.kind);
-                let (profile,options)=match (profile.validate(),options.validate()) {
+                let (profile,options)=match (profile.validate(),options.validate_collision()) {
                     (Ok(p),Ok(o))=>(p,o),
                     (Err(e),_)|(_,Err(e))=>{
                         report.ok=false;report.lines.push(e);return report;
                     }
                 };
                 let mut hits=Vec::new();
+                let mut block_hits=Vec::new();
+                let mut total_hits=0u64;
+                let mut reservoir_state=0x9E3779B97F4A7C15u64;
                 let mut bytes_scanned=0usize;
                 let mut failed_blocks=0usize;
                 let mut cancelled=false;
@@ -453,7 +475,19 @@ impl ScanState {
                                 let mut data=overlap.clone();
                                 data.extend_from_slice(&block);
                                 let base=addr-overlap.len();
-                                crate::collision::scan_bytes(base,&data,profile,RESULT_LIMIT,&mut hits);
+                                block_hits.clear();
+                                crate::collision::scan_bytes(base,&data,profile,
+                                    RESULT_LIMIT,&mut block_hits);
+                                for hit in block_hits.drain(..){
+                                    if hit.address+crate::collision::AABB_BYTES<=addr{continue;}
+                                    total_hits=total_hits.saturating_add(1);
+                                    if hits.len()<RESULT_LIMIT{hits.push(hit);continue;}
+                                    reservoir_state^=reservoir_state<<13;
+                                    reservoir_state^=reservoir_state>>7;
+                                    reservoir_state^=reservoir_state<<17;
+                                    let slot=reservoir_state%total_hits;
+                                    if slot<RESULT_LIMIT as u64{hits[slot as usize]=hit;}
+                                }
                                 let count=(crate::collision::AABB_BYTES-1).min(data.len());
                                 overlap=data[data.len()-count..].to_vec();
                                 // Prevent overlap across discontiguous slices.
@@ -463,7 +497,7 @@ impl ScanState {
                         }
                         bytes_scanned+=size;
                         offset+=size;
-                        if hits.len()>=RESULT_LIMIT {break 'regions;}
+                        // The retained-result cap never stops full memory traversal.
                     }
                 }
                 if cancelled {
@@ -476,9 +510,10 @@ impl ScanState {
                 hits.dedup_by_key(|h|h.address);
                 self.player_hitboxes=hits;
                 report.lines.push(format!(
-                    "玩家碰撞箱候选={}；扫描={} MiB；读取失败块={}；预算={} MiB；宽={:.3} 高={:.3} 容差={:.3}",
-                    self.player_hitboxes.len(),bytes_scanned/1048576,failed_blocks,
-                    options.budget_mib,profile.width,profile.height,profile.tolerance));
+                    "碰撞箱{}：命中总数={}，保留={}；扫描={:.1} MiB；读取失败块={}；宽={:.3} 高={:.3} 容差={:.3}",
+                    if options.budget_mib==0{"完整进程扫描"}else{"分段抽样"},
+                    total_hits,self.player_hitboxes.len(),bytes_scanned as f64/1048576.,failed_blocks,
+                    profile.width,profile.height,profile.tolerance));
                 report.lines.push("本结果仅是空间几何特征；含其他玩家、实体及物理缓存，不能直接作为 LocalPlayer 地址".into());
                 report.player_hitboxes=Some(self.player_hitboxes.clone());
                 report

@@ -314,7 +314,7 @@ impl Workbench{
         let mut options=self.scan_options()?;
         options.scope=ScanScope::Writable;
         options.budget_mib=budget;
-        let options=options.validate()?;
+        let options=options.validate_collision()?;
         self.engine.submit(Command::ScanPlayerAabb{profile,options})?;
         self.collision_width=profile.width;
         self.collision_height=profile.height;
@@ -921,10 +921,21 @@ impl Workbench{
                 }
             });
             ui.horizontal_wrapped(|ui|{
-                if ui.add_enabled(!self.engine.busy,egui::Button::new("开始碰撞箱快速扫描")).clicked(){
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("快速抽样")).clicked(){
                     match (self.collision_profile(),self.scan_options()){
                         (Ok(profile),Ok(mut options))=>{
                             options.scope=ScanScope::Writable;
+                            self.job(Command::ScanPlayerAabb{profile,options});
+                        }
+                        (Err(e),_)|(_,Err(e))=>self.log(format!("扫描参数无效：{e}")),
+                    }
+                }
+                if ui.add_enabled(!self.engine.busy,
+                    egui::Button::new("完整进程扫描")).clicked(){
+                    match (self.collision_profile(),self.scan_options()){
+                        (Ok(profile),Ok(mut options))=>{
+                            options.scope=ScanScope::Writable;
+                            options.budget_mib=0;
                             self.job(Command::ScanPlayerAabb{profile,options});
                         }
                         (Err(e),_)|(_,Err(e))=>self.log(format!("扫描参数无效：{e}")),
@@ -953,8 +964,9 @@ impl Workbench{
             });
             ui.label(RichText::new("建议流程：入世界静止时首次扫描 → 走几步后水平筛选 → 再跳跃筛选。动态筛选应在动作完成后点击，不能在同一帧循环扫描。")
                 .small().color(self.muted()));
-            ui.label(RichText::new(format!("候选数：{}；扫描预算由「内存扫描」的 MiB 和起止地址控制。",self.collision_hits.len()))
-                .strong());
+            ui.label(RichText::new(format!(
+                "保留候选：{}；快速抽样采用「内存扫描」预算，完整扫描无 MiB 限制；两者均按该页内存地址范围读取。",
+                self.collision_hits.len())).strong());
             if !self.collision_hits.is_empty(){
                 let max_pages=self.collision_hits.len().div_ceil(30).max(1);
                 self.collision_page=self.collision_page.min(max_pages-1);

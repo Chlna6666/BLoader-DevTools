@@ -460,7 +460,9 @@ fn call_tool(request:&Value) -> Value {
             }
             let profile=profile.validate()?;
             let budget=args["budget_mib"].as_u64().unwrap_or(256);
-            if !(16..=1024).contains(&budget){return Err("扫描预算应在16–1024 MiB之间".into());}
+            if budget!=0 && !(16..=1024).contains(&budget){
+                return Err("碰撞箱预算须为 0（完整扫描）或 16–1024 MiB".into());
+            }
             let res=ui_request(|reply|UiCommand::CollisionScan(profile,budget as usize,reply))??;
             return Ok(json!({"content":[{"type":"text","text":res}]}));
         }
