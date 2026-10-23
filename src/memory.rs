@@ -154,7 +154,7 @@ pub enum Command {
         kind:crate::local_player::SourceKind,
         access:crate::local_player::PlayerAccess,
     },
-    FindLocalPlayerIndex,
+    FindClientCodeSignatures,
     ScanPlayerAabb {profile:crate::collision::Profile,options:ScanOptions},
     RefinePlayerAabb {profile:crate::collision::Profile,motion:crate::collision::Motion},
     DiscoverLocalPlayer(crate::discovery::Options),
@@ -593,41 +593,34 @@ impl ScanState {
                 }
                 r
             },
-            Command::FindLocalPlayerIndex=>{
-                let mut r=Report::new("本地玩家虚表索引特征",self.kind);
-                let (start,len)=match crate::inspection::main_image_range(){
+            Command::FindClientCodeSignatures=>{
+                let mut r=Report::new("客户端参考代码特征",self.kind);
+                let (base,size)=match crate::inspection::main_image_range(){
                     Ok(v)=>v,Err(e)=>{r.ok=false;r.lines.push(e);return r;}
                 };
-                // The reference signature is historical. Never accept multiple
-                // matches and never auto-execute a resolved game method.
-                let options=ScanOptions{
-                    start,end:start.saturating_add(len),
-                    scope:ScanScope::Executable,
-                    budget_mib:len.div_ceil(1024*1024).clamp(16,MAX_SCAN_MIB),
-                };
-                let saved_hits=std::mem::take(&mut self.hits);
-                let mut matches=self.execute(Command::AobRange(
-                    crate::local_player::INDEX_REFERENCE_AOB.to_owned(),options
-                ));
-                r.hits=matches.hits.clone();
-                r.lines.push(format!("游戏主模块=0x{start:X}, image={} MiB, 特征候选={}",
-                    len.div_ceil(1024*1024),r.hits.len()));
-                r.lines.push("使用参考项目的旧特征，只适用于字节模式匹配的构建；不能证明这是当前版本的真实 getter。".into());
-                if r.hits.len()==1 {
-                    match crate::local_player::get_index_at(r.hits[0].address){
-                        Ok(index)=>{
-                            r.index_candidate=Some(index);
-                            r.lines.push(format!("唯一特征匹配，解析候选虚表索引={index}；需要玩家进出世界实机复核。"));
+                r.lines.push(format!("主模块 0x{base:X}，大小 {:.1} MiB；仅扫描 PE .text，不扫描游戏堆",size as f64/1048576.));
+                match crate::code_signatures::scan(base,size,&self.cancel){
+                    Ok(report)=>{
+                        r.lines.push(format!("PE .text {:.1} MiB；读取失败块={}；命中上限={}",
+                            report.scanned_bytes as f64/1048576.,report.read_failures,report.capped));
+                        for (label,addresses) in [
+                            ("ClientInstance::update",report.update),
+                            ("ClientInstance::getLocalPlayer",report.getter)
+                        ]{
+                            r.lines.push(format!("{label}: {} 个参考 AOB 候选",addresses.len()));
+                            for &addr in addresses.iter().take(12){
+                                r.lines.push(format!("  RVA 0x{:X} | 0x{addr:X}（未验证）",addr-base));
+                            }
+                            if addresses.is_empty(){
+                                r.lines.push("  当前游戏构建不符合参考字节特征；禁止猜测 RVA".into());
+                            }else if addresses.len()!=1||report.capped{
+                                r.lines.push("  命中不唯一或超过上限：禁止自动选取入口".into());
+                            }
                         }
-                        Err(e)=>{r.ok=false;r.lines.push(e);}
+                        r.lines.push("这是静态代码特征报告，不进行任何游戏函数调用/Hook/LocalPlayer 身份确认。".into());
                     }
-                }else{
-                    r.ok=false;
-                    r.lines.push("特征匹配非唯一或不存在，未自动推断虚表索引；请使用 AOB 工作台人工检查。".into());
+                    Err(e)=>{r.ok=false;r.lines.push(format!("代码特征扫描失败：{e}"));}
                 }
-                // Prior AOB hits are search results, not persisted player type proofs.
-                matches.hits.clear();
-                self.hits=saved_hits;
                 r
             },
             Command::Assert{address,kind,expected}=>{
