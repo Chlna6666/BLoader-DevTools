@@ -112,6 +112,27 @@ fn regions(only_private:bool, executable:bool, start:usize,end:usize)->Vec<Regio
     }
     result
 }
+/// Find an x86 instruction reference with an exact 9-byte anchor first,
+/// then verify the entire signature including wildcards. This avoids the
+/// O(image_size * signature_length) generic AOB matcher for every byte.
+fn find_reference_matches(base:usize,bytes:&[u8],pattern:&Pattern,out:&mut Vec<usize>){
+    const PREFIX:[u8;9]=[0x49,0x8B,0x00,0x49,0x8B,0xC8,0x48,0x8B,0x80];
+    if bytes.len()<pattern.0.len(){return;}
+    let mut offset=0usize;
+    while offset+pattern.0.len()<=bytes.len() && out.len()<MAX_SYMBOL_MATCHES {
+        let Some(hit)=bytes[offset..].iter().position(|b|*b==PREFIX[0]) else{break;};
+        let at=offset+hit;
+        if at+pattern.0.len()>bytes.len(){break;}
+        if bytes[at..at+PREFIX.len()]==PREFIX &&
+            pattern.0.iter().zip(&bytes[at..at+pattern.0.len()])
+                .all(|(expect,got)|expect.is_none_or(|e|e==*got)) {
+            let address=base+at;
+            if !out.contains(&address){out.push(address);}
+        }
+        offset=at+1;
+    }
+}
+
 fn scan_symbol(cancel:&AtomicBool)->SymbolEvidence{
     let mut evidence=SymbolEvidence{
         base:0,image_size:0,matches:Vec::new(),index:None,status:String::new(),
@@ -142,13 +163,7 @@ fn scan_symbol(cancel:&AtomicBool)->SymbolEvidence{
                     let mut combined=overlap.clone();
                     combined.extend_from_slice(&bytes);
                     let base=address-overlap.len();
-                    for at in signature.matches(&combined){
-                        let address=base+at;
-                        if !evidence.matches.contains(&address){
-                            evidence.matches.push(address);
-                        }
-                        if evidence.matches.len()>=MAX_SYMBOL_MATCHES{break;}
-                    }
+                    find_reference_matches(base,&combined,&signature,&mut evidence.matches);
                     let copy=(signature.0.len()-1).min(combined.len());
                     overlap=combined[combined.len()-copy..].to_vec();
                     prev_end=address+n;
@@ -304,7 +319,8 @@ fn collect_links(seed:&Seed,limit:usize,cancel:&AtomicBool)->Vec<EcsLink>{
     let mut total=0usize;
     let mut overlap=Vec::new();
     let mut previous_end=0usize;
-    for region in regions(true,false,0x10000,usize::MAX){
+    let eligible=regions(true,false,0x10000,usize::MAX);
+    for region in geometry_regions(&eligible,limit){
         let mut offset=0usize;
         while offset<region.len && total<limit && links.len()<MAX_LINKS {
             if cancel.load(Ordering::Acquire){return links;}
@@ -481,7 +497,25 @@ mod tests {
         push_geometry(0x10000,&data,profile,&mut result);
         assert!(result.iter().any(|p|p.address==0x10010 && p.kind==SeedKind::Vec3Position));
     }
-    #[test]fn sample_budget_spreads_across_regions(){
+    #[test]fn anchored_symbol_disambiguates_and_checks_wildcards(){
+        let pattern=Pattern::parse(local_player::INDEX_REFERENCE_AOB).unwrap();
+        let mut bytes=vec![0xCC;120];
+        for (i,item) in pattern.0.iter().enumerate(){
+            bytes[16+i]=item.unwrap_or(0x55);
+        }
+        let mut result=Vec::new();
+        find_reference_matches(0x400000,&bytes,&pattern,&mut result);
+        assert_eq!(result,vec![0x400010]);
+        bytes[16+10]=0x66; // a wildcard displacement byte: still matches
+        result.clear();
+        find_reference_matches(0x400000,&bytes,&pattern,&mut result);
+        assert_eq!(result.len(),1);
+        bytes[16]=0x48; // break exact anchor
+        result.clear();
+        find_reference_matches(0x400000,&bytes,&pattern,&mut result);
+        assert!(result.is_empty());
+    }
+        #[test]fn sample_budget_spreads_across_regions(){
         let regs=vec![
             Region{base:0x10000,len:128*1024*1024},
             Region{base:0x20000000,len:128*1024*1024},
