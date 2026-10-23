@@ -587,8 +587,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
     let mut was_f8_down = false;
     let mut keep_running = true;
     while keep_running && running.load(Ordering::Acquire) &&
-        unsafe { IsWindow(hwnd) != 0 } &&
-        {
+        unsafe { IsWindow(hwnd) != 0 } {
         let mut msg: MSG = unsafe { mem::zeroed() };
         while unsafe { PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
             if msg.message == WM_QUIT {
