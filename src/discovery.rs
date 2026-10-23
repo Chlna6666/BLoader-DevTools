@@ -293,6 +293,7 @@ fn collect_geometry(profile:Profile,budget:usize,cancel:&AtomicBool)->GeometryRe
     let mut previous_end=0usize;
     let mut leftover=Vec::with_capacity(23);
     let mut block=vec![0u8;BLOCK];
+    let mut joined=Vec::with_capacity(BLOCK+23);
     let mut matches=Vec::with_capacity(1024);
     for segment in schedule{
         if cancel.load(Ordering::Acquire){break;}
@@ -304,7 +305,7 @@ fn collect_geometry(profile:Profile,budget:usize,cancel:&AtomicBool)->GeometryRe
             let n=(segment.len-offset).min(BLOCK);
             if memory::read_into(at,&mut block[..n]).is_ok(){
                 if previous_end!=at{leftover.clear();}
-                let mut joined=Vec::with_capacity(leftover.len()+n);
+                joined.clear();
                 joined.extend_from_slice(&leftover);
                 joined.extend_from_slice(&block[..n]);
                 matches.clear();
@@ -342,7 +343,9 @@ fn read_ptr(address:usize)->Option<usize>{
 }
 fn pointer_targets(seed:usize)->HashMap<usize,usize>{
     let mut wanted=HashMap::new();
-    for offset in (0..=128).step_by(8){
+    // AABB/Vec3 payloads are 4-byte aligned and may live at +4 from an
+    // 8-byte-aligned component base. Do not miss real component pointers.
+    for offset in (0..=128).step_by(4){
         if let Some(addr)=seed.checked_sub(offset){
             wanted.insert(addr,offset);
         }
@@ -705,6 +708,7 @@ mod tests {
         let targets=pointer_targets(0x20080);
         assert_eq!(targets.get(&0x20000),Some(&128));
         assert_eq!(targets.get(&0x20080),Some(&0));
+        assert_eq!(targets.get(&0x2007C),Some(&4));
     }
     #[test]fn motion_validation_uses_position_change(){
         let seed=Seed{address:0x20000,kind:SeedKind::Vec3Position,
@@ -722,8 +726,19 @@ mod tests {
         assert_eq!(result.confidence,"仅几何/位置候选");
         assert!(result.status.contains("没有游戏线程 getter"));
     }
+    #[test]fn reservoir_does_not_stop_at_capacity(){
+        let mut pool=CandidatePool::new();
+        for n in 0..(MAX_GEOMETRY*6){
+            pool.append(Seed{address:0x10000+n*8,kind:SeedKind::Aabb,
+                position:Vec3{x:n as f32,y:64.,z:0.},distance:0.});
+        }
+        assert_eq!(pool.total,(MAX_GEOMETRY*6) as u64);
+        assert_eq!(pool.hits.len(),MAX_GEOMETRY);
+        assert!(pool.hits.iter().any(|x|x.address>=0x10000+MAX_GEOMETRY*8));
+    }
     #[test]fn validates_budget() {
         let options=Options{profile:Profile::default(),budget_mib:8,source_instance:None};
         assert!(options.validate().is_err());
+        assert!(Options{budget_mib:0,..options}.validate().is_ok());
     }
 }
