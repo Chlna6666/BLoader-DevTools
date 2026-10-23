@@ -206,6 +206,10 @@ pub struct Workbench {
     collision_page:usize,
     discovery_report:Option<discovery::Report>,
     discovery_budget:usize,
+    symbol_module:String,
+    symbol_name:String,
+    symbol_use_pdb:bool,
+    symbol_status:Vec<String>,
 }
 impl Default for Workbench{
     fn default()->Self{
@@ -254,6 +258,10 @@ impl Default for Workbench{
             collision_page:0,
             discovery_report:None,
             discovery_budget:256,
+            symbol_module:"Minecraft.Windows.exe".into(),
+            symbol_name:"ClientInstance::getLocalPlayer".into(),
+            symbol_use_pdb:false,
+            symbol_status:Vec::new(),
         }
     }
 }
@@ -430,6 +438,9 @@ impl Workbench{
                 for line in &report.lines {self.log(line.clone());}
             }
             match report.title.as_str(){
+                "符号模块清单"|"客户端符号解析"=>{
+                    self.symbol_status=report.lines.clone();
+                },
                 "统一本地玩家分析"|"统一定位行为验证"=>{
                     self.discovery_report=report.discovery;
                 },
@@ -652,6 +663,35 @@ impl Workbench{
         ui.heading("本地玩家 / LocalPlayer 定位向导");
         ui.label(RichText::new("开发常用路径：ClientInstance → getLocalPlayer() → LocalPlayer。此页只读，不调用未验证的游戏虚函数。")
             .color(self.muted()).small());
+        ui.add_space(8.);
+        Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
+            ui.strong("模块符号 / Local PDB · 符号库按 SHA-256 精确匹配");
+            ui.horizontal_wrapped(|ui|{
+                ui.label("模块");
+                ui.add(TextEdit::singleline(&mut self.symbol_module).desired_width(190.));
+                ui.label("符号");
+                ui.add(TextEdit::singleline(&mut self.symbol_name).desired_width(210.));
+            });
+            ui.horizontal_wrapped(|ui|{
+                ui.checkbox(&mut self.symbol_use_pdb,"允许本地 DbgHelp/PDB（不联网）");
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("刷新模块")).clicked(){
+                    self.job(Command::SymbolInventory);
+                }
+                if ui.add_enabled(!self.engine.busy,egui::Button::new("解析符号")).clicked(){
+                    self.job(Command::ResolveSymbol{
+                        module:self.symbol_module.clone(),
+                        symbol:self.symbol_name.clone(),
+                        local_pdb:self.symbol_use_pdb,
+                    });
+                }
+            });
+            ui.label(RichText::new(
+                "版本库：%LOCALAPPDATA%/BLoader-DevTools/symbol_profiles.json · ECS：ecs_layouts.json。没有同一模块 SHA-256 的记录时不套用偏移。")
+                .small().color(self.muted()));
+            for line in self.symbol_status.iter().take(12){
+                ui.label(RichText::new(line).monospace().small());
+            }
+        });
         ui.add_space(8.);
         Frame::new().fill(self.panel()).inner_margin(12.).show(ui,|ui|{
             ui.heading("一键分析 · Symbol Resolver → ECS Inspector → LocalPlayer Validator");

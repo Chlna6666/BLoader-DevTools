@@ -19,7 +19,7 @@ fn replace_file_windows(temp:&std::path::Path,target:&std::path::Path)->Result<(
 }
 use crate::{signature::Pattern,memory::{ValueKind,parse_address}};
 const MAX_FILE:usize=160*1024*1024;
-fn root()->Result<PathBuf,String>{
+pub(crate) fn root()->Result<PathBuf,String>{
     let base=std::env::var_os("LOCALAPPDATA").ok_or("无法找到 LOCALAPPDATA")?;
     let folder=PathBuf::from(base).join("BLoader-DevTools");
     fs::create_dir_all(&folder).map_err(|e|e.to_string())?;

@@ -1,4 +1,4 @@
-# DevTools 功能与正确性路线图（0.3.0）
+# DevTools 功能与正确性路线图（0.3.1）
 > 目标：完全由 DevTools.dll 实现原生调试与 AI 自动化；BLoader 只提供加载、卸载、日志。所有勾选以代码与 Windows 编译测试为依据，游戏实机结果单列记录。
 
 ## 当前已实现
@@ -28,7 +28,11 @@
 - [x] ECS Inspector：优先候选的指针反向引用查询、MSVC x64 RTTI 启发式 Actor/Player 类型线索
 - [x] LocalPlayer Validator：空间/结构/引用/RTTI 分级证据，及连续行为采样筛选；空筛选不销毁上一轮快照，未经过 getter 校验不得假称已定位
 - [x] UI 和 MCP：一键统一后台分析、覆盖率/引用报告、取消支持
-- [ ] GameAssembly/多模块扫描与 PDB/已确认符号映射、独立符号版本数据库
+- [x] ToolHelp 多模块清单和精确 SHA-256 离线 RVA 符号库，并支持可选本地 DbgHelp/PDB
+- [x] 当前游戏 EXE 哈希匹配的 ECS 指针偏移配置 + 双向引用结构检查
+- [ ] 多模块的签名自动生成/评分与兼容模块加载，当前仍需明确符号名和版本
+- [ ] 从客户端实际 EnTT/EntityContext/Registry 证据抽取组件偏移，不假设 BDS 与客户端布局相同
+- [ ] 核验 ClientInstance::update ABI 后安装安全 Hook，在真实游戏线程采集 this 并验证 getter 生命周期
 - [ ] 根据客户端游戏线程和真实 ECS 注册表验证 PlayerComponent/ActorOwnerComponent，取得真正 LocalPlayer*
 - [ ] 反引用阶段由受信任的组件偏移数据驱动；避免当前启发式 RTTI 假阳性
 - [ ] 真实 Minecraft 本机、远程会话、不同构建的端到端数据验证

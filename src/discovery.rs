@@ -10,7 +10,7 @@ use windows_sys::Win32::System::Memory::{
     PAGE_EXECUTE_READWRITE,PAGE_EXECUTE_WRITECOPY,PAGE_READONLY,
     PAGE_EXECUTE_READ,
 };
-use crate::{collision::{self,Profile,Vec3},inspection,local_player,memory,signature::Pattern};
+use crate::{collision::{self,Profile,Vec3},inspection,local_player,memory,signature::Pattern,ecs_layout};
 
 const BLOCK:usize=64*1024;
 const MAX_GEOMETRY:usize=1536;
@@ -52,6 +52,7 @@ pub struct Validated {
     pub status:String,
     pub score:u32,
     pub confidence:&'static str,
+    pub ecs_relation:Option<ecs_layout::Evidence>,
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -388,28 +389,56 @@ fn maybe_owner(slot:usize,module_base:usize,module_size:usize)->Option<(usize,St
     }
     None
 }
-fn validate(seed:Seed,mut links:Vec<EcsLink>,symbol:&SymbolEvidence)->Validated{
+fn validate(seed:Seed,mut links:Vec<EcsLink>,symbol:&SymbolEvidence,
+    layout:Option<&ecs_layout::Layout>)->Validated{
+    let mut ecs_relation=None;
     let mut strong=false;
     let mut owner=false;
     for link in &mut links {
-        if let Some((address,name))=maybe_owner(link.pointer_slot,symbol.base,symbol.image_size){
-            link.actor_candidate=Some(address);
-            link.type_hint=Some(name.clone());
-            if name.contains("Player"){strong=true;}
-            if name.contains("Actor"){owner=true;}
+        // A version-bound profile can prove a reversible relationship across
+        // Actor ↔ ActorOwnerComponent ↔ PlayerComponent ↔ AABBShapeComponent.
+        // The slot may belong to any of the three pointer members.
+        if let Some(layout)=layout{
+            for offset in [layout.actor_owner_ptr,layout.player_component_ptr,
+                layout.aabb_component_ptr] {
+                if let Some(actor)=link.pointer_slot.checked_sub(offset){
+                    if let Some(proof)=ecs_layout::inspect(actor,seed.address,layout){
+                        link.actor_candidate=Some(proof.actor);
+                        link.type_hint=Some("profile-linked ECS components".into());
+                        ecs_relation=Some(proof);
+                        owner=true;
+                        break;
+                    }
+                }
+            }
+        }
+        if ecs_relation.is_none(){
+            if let Some((address,name))=maybe_owner(
+                link.pointer_slot,symbol.base,symbol.image_size){
+                link.actor_candidate=Some(address);
+                link.type_hint=Some(name.clone());
+                if name.contains("Player"){strong=true;}
+                if name.contains("Actor"){owner=true;}
+            }
         }
     }
     let score=(seed.kind==SeedKind::Aabb) as u32*20+
         (seed.distance<2.) as u32*15+
         (!links.is_empty()) as u32*15+
-        owner as u32*15+strong as u32*25;
-    let confidence=if strong{"类型候选（未确认受本机控制）"}
+        owner as u32*15+strong as u32*25+
+        ecs_relation.is_some() as u32*55;
+    let confidence=if ecs_relation.is_some(){
+        "版本化 ECS 结构一致（非 LocalPlayer 身份）"
+    }else if strong{"类型候选（未确认受本机控制）"}
         else if owner{"Actor 所有者候选"}
         else if !links.is_empty(){"组件引用候选"}
         else{"仅几何/位置候选"};
+    let relation_present=ecs_relation.is_some();
     Validated{
-        seed,links,
-        status:if strong {
+        seed,links,ecs_relation,
+        status:if relation_present {
+            "版本化 Owner/Player/Shape 组件结构检查通过；尚需 ClientInstance getter 进行本地控制身份交叉验证".into()
+        }else if strong {
             "RTTI 与 Player 相关，但未证明是当前客户端控制的 LocalPlayer".into()
         }else{
             "没有游戏线程 getter / ECS PlayerComponent / ClientInstance 一致性证明".into()
@@ -422,7 +451,27 @@ pub fn run(options:Options,cancel:&AtomicBool)->Result<Report,String>{
     let mut messages=Vec::new();
     let build_id=local_player::executable_build_id().ok();
     let symbol=scan_symbol(cancel);
+    // Exact-version symbol profiles take priority over an old community
+    // byte pattern. Resolve is read-only and does not invoke the function.
+    if let Ok(modules)=crate::symbols::modules(){
+        if let Some(main)=modules.first(){
+            match crate::symbols::resolve(&main.name,"ClientInstance::getLocalPlayer",false){
+                Ok(Some(located))=>messages.push(format!(
+                    "Symbol Resolver 精确映射：{} RVA=0x{:X} SHA-256={}（不可自动调用）",
+                    located.module,located.rva,located.module_sha256)),
+                Ok(None)=>messages.push("主模块未配置对应版本的 getLocalPlayer 符号；已执行参考 AOB 降级".into()),
+                Err(e)=>messages.push(format!("版本化符号库读取失败：{e}")),
+            }
+        }
+    }
+    let ecs_layout=build_id.as_deref()
+        .and_then(|id|ecs_layout::load_for_build(id).ok().flatten());
     messages.push(format!("Symbol Resolver：{}",symbol.status));
+    messages.push(if ecs_layout.is_some(){
+        "ECS Profile：发现与当前 EXE SHA-256 一致的版本化组件偏移配置；逐对象验证所有权反向指针".into()
+    }else{
+        "ECS Profile：没有精确匹配的客户端布局；仅提供 RTTI 与指针启发式候选，禁止推断 PlayerComponent 类型".into()
+    });
     if let Some(source)=options.source_instance {
         if let Some(index)=symbol.index {
             match local_player::probe(source,local_player::SourceKind::DirectInstance,
@@ -459,7 +508,7 @@ pub fn run(options:Options,cancel:&AtomicBool)->Result<Report,String>{
         let links=collect_links(seed,options.budget_mib*1024*1024/2,cancel);
         messages.push(format!("ECS 指针引用 {}：0x{:X} 找到 {} 个可能的组件基址引用",
             i+1,seed.address,links.len()));
-        inspected.push(validate(seed.clone(),links,&symbol));
+        inspected.push(validate(seed.clone(),links,&symbol,ecs_layout.as_ref()));
     }
     inspected.sort_by(|a,b|b.score.cmp(&a.score));
     messages.push("LocalPlayer Validator：尚未安全获取当前游戏线程的 getLocalPlayer 返回值，所有结果均为候选，禁止自动导出 Actor*。".into());
@@ -529,7 +578,9 @@ pub fn refine(previous:&Report,motion:collision::Motion,profile:Profile,
     for candidate in updated.seeds.iter().take(5){
         if cancel.load(Ordering::Acquire){updated.cancelled=true;return Ok(previous.clone());}
         let links=collect_links(candidate,32*1024*1024,cancel);
-        let mut verified=validate(candidate.clone(),links,&updated.symbol);
+        let profile=updated.build_id.as_deref()
+            .and_then(|id|ecs_layout::load_for_build(id).ok().flatten());
+        let mut verified=validate(candidate.clone(),links,&updated.symbol,profile.as_ref());
         verified.score+=updated.validation_rounds.min(4)*8;
         verified.status.push_str("；与人工操作后的运动变化吻合（不代表游戏本地控制身份）");
         updated.inspected.push(verified);
@@ -547,6 +598,10 @@ pub fn summarise(report:&Report)->String{
         lines.push(format!("{}: {} 0x{:X} 距离={:.2} 评分={} {:?} 引用={}；{}",
             index+1,item.seed.kind.label(),item.seed.address,item.seed.distance,
             item.score,item.confidence,item.links.len(),item.status));
+        if let Some(ecs)=&item.ecs_relation{
+            lines.push(format!("  Profile ECS 结构：Actor=0x{:X} OwnerComponent=0x{:X} PlayerComponent=0x{:X} ShapeComponent=0x{:X}；非本地控制身份",
+                ecs.actor,ecs.owner_component,ecs.player_component,ecs.shape_component));
+        }
         for link in item.links.iter().take(3) {
             lines.push(format!("  引用槽=0x{:X} → 0x{:X} 偏移=0x{:X} actor={:?} RTTI={}",
                 link.pointer_slot,link.points_to,link.offset_before_seed,
@@ -617,7 +672,7 @@ mod tests {
             position:Vec3{x:1.,y:2.,z:3.},distance:0.};
         let symbol=SymbolEvidence{base:0,image_size:0,matches:Vec::new(),index:None,
             status:"missing".into()};
-        let result=validate(seed,Vec::new(),&symbol);
+        let result=validate(seed,Vec::new(),&symbol,None);
         assert_eq!(result.confidence,"仅几何/位置候选");
         assert!(result.status.contains("没有游戏线程 getter"));
     }

@@ -10,6 +10,8 @@ mod inspection;
 mod local_player;
 mod collision;
 mod discovery;
+mod symbols;
+mod ecs_layout;
 mod mcp;
 mod capture;
 mod ui;

@@ -151,6 +151,8 @@ pub enum Command {
         motion:crate::collision::Motion,
         profile:crate::collision::Profile,
     },
+    SymbolInventory,
+    ResolveSymbol {module:String,symbol:String,local_pdb:bool},
 }
 #[derive(Debug,Clone)]
 pub struct Report {
@@ -344,6 +346,32 @@ impl ScanState{
 impl ScanState {
     fn execute(&mut self, cmd:Command)->Report{
         match cmd {
+            Command::SymbolInventory=>{
+                let mut r=Report::new("符号模块清单",self.kind);
+                match crate::symbols::inventory(){
+                    Ok(lines)=>{
+                        r.lines.push("模块清单使用 SHA-256 精确版本标识，profile 是离线符号记录，不允许错版本套用".into());
+                        r.lines.extend(lines);
+                    }
+                    Err(e)=>{r.ok=false;r.lines.push(e);}
+                }
+                r
+            },
+            Command::ResolveSymbol{module,symbol,local_pdb}=>{
+                let mut r=Report::new("客户端符号解析",self.kind);
+                match crate::symbols::resolve(&module,&symbol,local_pdb){
+                    Ok(Some(located))=>{
+                        r.lines.push(format!(
+                            "{}!{} = 0x{:X} (RVA 0x{:X}), source={:?}, SHA-256={}",
+                            located.module,located.symbol,located.address,located.rva,
+                            located.origin,located.module_sha256));
+                        r.lines.push("已完成符号地址映射；还未验证调用约定、游戏线程或 LocalPlayer 返回值".into());
+                    }
+                    Ok(None)=>r.lines.push("无精确版本离线符号；本地 PDB 未发现或未开启，未采用其他版本的偏移".into()),
+                    Err(e)=>{r.ok=false;r.lines.push(e);}
+                }
+                r
+            },
             Command::RefineDiscoveredPlayer{motion,profile}=>{
                 let mut report=Report::new("统一定位行为验证",self.kind);
                 let Some(previous)=self.last_discovery.as_ref() else {

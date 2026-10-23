@@ -1,6 +1,6 @@
 # BLoader DevTools
 
-版本：0.3.0 · 作者：Chlna6666 · GPL-3.0-only
+版本：0.3.1 · 作者：Chlna6666 · GPL-3.0-only
 
 项目：https://github.com/Chlna6666/BLoader-DevTools
 
@@ -66,6 +66,28 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 - 特征数据库写回改用 Windows 文件替换机制，避免第二次保存已有特征时文件重名失败。
 - 仍待实现完全可拖拽的 IntelliJ IDEA 停靠面板、CE AutoAssembler、硬件断点、指针扫描、真正 RenderDragon 帧捕获与跨版本 CFG/ABI 迁移；详见 [DEVTOOLS_TODO.md](DEVTOOLS_TODO.md)。
 
+
+## 0.3.1 多模块符号解析与版本化 ECS 校验
+
+参考长期维护的 LeviLamina、Flarial 和近期 26.52 客户端的 MCBE_DX12_ModBase。借鉴符号缓存、游戏 update 中捕获 ClientInstance this、组件关系验证等方法；不复制未验证偏移。
+
+- DevTools 独立枚举进程的各个模块，计算原始模块文件 SHA-256，仅加载完全相同版本的本地 RVA 符号表。
+- DbgHelp/PDB 查询为可选开关，仅使用模块所在文件夹的本地符号，不联网。
+- LocalPlayer 页面可以刷新模块目录，填写模块名称与符号，并查看 RVA、原始 VA、来源和 SHA-256。
+- ECS 校验仅加载与 Minecraft EXE SHA-256 完全匹配的组件指针布局，核实 Actor / ActorOwnerComponent / PlayerComponent / ShapeComponent 的双向关系；仍不证明本机 LocalPlayer 身份。
+- 目前没有启用对游戏 ClientInstance::update 的自动 Hook 或调用 getter。必须验证目标游戏构建、代码 ABI 和游戏线程、卸载生命周期才能安全执行。
+
+符号库：%LOCALAPPDATA%/BLoader-DevTools/symbol_profiles.json。格式：
+
+~~~json
+{"schema":1,"modules":[{"name":"Minecraft.Windows.exe","sha256":"请使用游戏真实64字符sha256","symbols":{"ClientInstance::getLocalPlayer":"0x已验证RVA"}}]}
+~~~
+
+以上字符串只是配置结构说明，不是可直接导入的真实符号/偏移，项目拒绝长度不正确的 SHA-256。地址必须经真实目标版本验证。
+
+ECS 布局：%LOCALAPPDATA%/BLoader-DevTools/ecs_layouts.json。字段包括 module_sha256、actor_owner_ptr、player_component_ptr、aabb_component_ptr、owner_backref、player_backref 和 aabb_offset。所有偏移必须来自特定客户端构建的可信证据，不能直接使用服务器版本的 ECS 布局。
+
+参考：https://github.com/LiteLDev/LeviLamina · https://github.com/flarialmc/dll-oss · https://github.com/b01dev/MCBE_DX12_ModBase
 
 ## 0.3.0 统一本地玩家分析链路（实验性）
 
