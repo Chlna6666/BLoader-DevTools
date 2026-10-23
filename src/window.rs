@@ -674,6 +674,7 @@ fn run(running: Arc<AtomicBool>, window_slot: Arc<AtomicIsize>) -> Result<(), St
                     // thread. Direct read-only status is handled in MCP.
                     let result=match action{
                         crate::lifecycle::Action::Verify|
+                        crate::lifecycle::Action::ValidatePlayer|
                         crate::lifecycle::Action::Stop=>{
                             workbench.submit_lifecycle_for_ai(action)
                         },

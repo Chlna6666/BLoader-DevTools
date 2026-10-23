@@ -76,7 +76,7 @@ write 需要显式勾选当前运行的写入权限，并指定预期旧值。�
 1. **版本身份**：本地配置中的模块名、SHA-256、RVA 必须完全匹配实际 Windows 进程模块。
 2. **代码完整性**：要求 12–48 个完整机器码字节，使用 iced-x86 检查整条指令边界、可执行页及函数入口当前字节；拒绝已明显存在 JMP/INT3 补丁的入口。其他 Mod 仍可能通过非入口补丁 Hook，不能保证排除一切 Hook 冲突。
 3. **显式 UI 授权**：初始状态不安装；用户先勾选风险确认，再点击「启用 update 观察」。观察回调仅通过原子变量记录真实游戏更新线程、ClientInstance 候选、调用次数、最近 3 秒活跃状态；不分配、扫描内存、写日志或者操作 egui。
-4. **getter 独立授权**：需要在配置中另外给出同样严格验证的 getter 模块/入口字节与 `client_get_local_player_this_to_ptr` ABI。点击「单独启用 getter 调用」后才会在真实 `update` 游戏线程、原始 update 结束、ready 标志满足条件时调用目标 getter。用户必须先反汇编确认返回类型与 ABI，否则可能导致游戏崩溃。所得指针标记为 candidate-only。
+4. **getter 独立授权**：需要在配置中另外给出同样严格验证的 getter 模块/入口字节与 `client_get_local_player_this_to_ptr` ABI。点击「单独启用 getter 调用」后才会在真实 `update` 游戏线程、原始 update 结束、ready 标志满足条件时调用目标 getter。用户必须先反汇编确认返回类型与 ABI，否则可能导致游戏崩溃。所得指针标记为 candidate-only。 增加「验证 Getter 对象 ECS 关系」按钮（或 MCP 的 `devtools_lifecycle(action="validate_player")`）：仅在最近 3 秒的真实 update/ggetter 返回值有效且对应游戏 EXE 的 ecs_layouts.json 精确匹配时，在后台线程读回 ActorOwner、PlayerComponent、ShapeComponent 和组件 backref。检查期间如果观察到对象更换就拒绝结果。这是结构复核而不是完整的本地控制身份和跨世界生命周期验证。
 
 配置文件：`%LOCALAPPDATA%\BLoader-DevTools\client_lifecycle.json`。结构说明：
 

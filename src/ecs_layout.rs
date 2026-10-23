@@ -92,22 +92,30 @@ pub struct Evidence {
     pub shape_value_address:usize,
     pub status:&'static str,
 }
-pub fn inspect(actor:usize,seed:usize,layout:&Layout)->Option<Evidence>{
+/// Inspect a captured Actor/Player candidate without first requiring a
+/// geometry seed. Only a version-exact profile can authorize these offsets.
+/// All reads use ReadProcessMemory and may fail during world unload.
+pub fn inspect_known_actor(actor:usize,layout:&Layout)->Option<Evidence>{
     if actor<0x10000||actor%8!=0{return None;}
     let (owner,player,shape)=exact_relation(actor,layout,|at|{
         let raw=memory::read(at,8).ok()?;
         Some(u64::from_le_bytes(raw.try_into().ok()?) as usize)
     })?;
     let data=shape.checked_add(layout.aabb_offset)?;
-    // Exact or embedded Vec3/AABB candidate within bounds field, not a
-    // generic pointer ±128 bytes that can accidentally hit an unrelated array.
-    if seed<data || seed-data>24{return None;}
     if memory::read(data,24).is_err(){return None;}
     Some(Evidence{
         actor,owner_component:owner,player_component:player,
         shape_component:shape,shape_value_address:data,
         status:"版本匹配的三组件双向引用成立；仍未验证 LocalPlayer 控制归属",
     })
+}
+pub fn inspect(actor:usize,seed:usize,layout:&Layout)->Option<Evidence>{
+    let evidence=inspect_known_actor(actor,layout)?;
+    // A geometry seed may be within the embedded bounds payload.
+    if seed<evidence.shape_value_address || seed-evidence.shape_value_address>24 {
+        return None;
+    }
+    Some(evidence)
 }
 #[cfg(test)]
 mod tests {
@@ -125,7 +133,28 @@ mod tests {
         assert_eq!(layouts.len(),1);
         assert!(decode(r#"{"schema":1,"layouts":[{"module_sha256":"wrong"}]}"#).is_err());
     }
-    #[test]fn two_sided_relations_reject_wrong_ownership(){
+    #[test]fn reads_three_backlinked_components_from_owned_buffers(){
+        let layout=decode(&sample()).unwrap().remove(0);
+        let mut actor=Box::new([0usize;8]);
+        let mut owner=Box::new([0usize;8]);
+        let mut player=Box::new([0usize;8]);
+        let shape=Box::new([0u64;16]);
+        let actor_addr=actor.as_mut_ptr() as usize;
+        let owner_addr=owner.as_mut_ptr() as usize;
+        let player_addr=player.as_mut_ptr() as usize;
+        let shape_addr=shape.as_ptr() as usize;
+        actor[1]=owner_addr;
+        actor[2]=player_addr;
+        actor[3]=shape_addr;
+        owner[0]=actor_addr;
+        player[0]=actor_addr;
+        let report=inspect_known_actor(actor_addr,&layout).unwrap();
+        assert_eq!(report.actor,actor_addr);
+        assert_eq!(report.player_component,player_addr);
+        player[0]=0;
+        assert!(inspect_known_actor(actor_addr,&layout).is_none());
+    }
+        #[test]fn two_sided_relations_reject_wrong_ownership(){
         let layout=decode(&sample()).unwrap().remove(0);
         let actor=0x100000usize;
         let owner=0x200000usize;

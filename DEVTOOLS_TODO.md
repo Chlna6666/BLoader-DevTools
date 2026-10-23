@@ -34,6 +34,7 @@
 - [ ] 从客户端实际 EnTT/EntityContext/Registry 证据抽取组件偏移，不假设 BDS 与客户端布局相同
 - [x] 实验性生命周期观察器：精确模块 SHA-256/RVA/完整入口指令核验，显式本地操作才安装 update Hook
 - [x] 回调只记录原子状态，调用原始 update trampoline；独立手动授权后才调用已配置 getter，并支持退休、清空和 3 秒新鲜度
+- [x] 在 DevTools 后台线程用精确 ECS 布局验证刚捕获的 getter 候选：双向引用完整、对象快照未变化才报告结构一致
 - [ ] 从当前零售版 Minecraft 精确确认 ClientInstance::update/getLocalPlayer 的 ABI，并完成真实 Windows 游戏（多版本）回归
 - [ ] 游戏线程回调卸载竞态、多个 ClientInstance/分屏、世界退出时的指针代次与后验确认
 - [ ] 需要精确验证 EntityContext/PlayerComponent 的客户端控制归属，不能把 getter 返回地址直接变成稳定 SDK 句柄

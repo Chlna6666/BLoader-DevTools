@@ -269,8 +269,43 @@ pub fn stop()->Result<String,String>{
     clear_snapshot();
     Ok("观察器已关闭、原函数 trampoline 已退休、采集指针已清除".into())
 }
+/// Check the captured getter result against the exact game EXE's ECS
+/// profile, on the DevTools worker (never in the hot game update detour).
+pub fn validate_captured_player()->Result<String,String>{
+    let (active,getter)=CONTROL.lock()
+        .map(|c|(c.active,c.getter!=0))
+        .map_err(|_|"观察器控制锁已损坏")?;
+    if !active || !getter {
+        return Err("需要先启用观察器，并由用户单独批准 getter ABI".into());
+    }
+    let now=unsafe{GetTickCount64()};
+    let last=LAST_SEEN.load(Ordering::Acquire);
+    if last==0 || now.saturating_sub(last)>OBSERVATION_TTL_MS {
+        return Err("最近 3 秒没有新鲜的游戏 update 回调；请进入世界重试".into());
+    }
+    if !IS_READY.load(Ordering::Acquire){
+        return Err("最近一次 update 的 ready 标志尚未就绪".into());
+    }
+    let player=PLAYER.load(Ordering::Acquire);
+    let instance=INSTANCE.load(Ordering::Acquire);
+    if player<0x10000 || player&7!=0 || instance<0x10000 {
+        return Err("getter 当前返回 nullptr、非法地址，或 ClientInstance 尚未确认".into());
+    }
+    let build=crate::local_player::executable_build_id()?;
+    let layout=crate::ecs_layout::load_for_build(&build)?
+        .ok_or("没有与当前客户端 EXE SHA-256 完全匹配的 ecs_layouts.json 配置，拒绝使用旧版偏移")?;
+    let evidence=crate::ecs_layout::inspect_known_actor(player,&layout)
+        .ok_or("getter 候选未通过 ActorOwner / Player / Shape 三组件及双向引用验证；不输出已确认对象")?;
+    if LAST_SEEN.load(Ordering::Acquire)!=last ||
+        PLAYER.load(Ordering::Acquire)!=player {
+        return Err("检查过程中游戏对象已更新，拒绝提交跨代次的结构结果".into());
+    }
+    Ok(format!(
+        "结构验证通过（仅限当前快照）：ClientInstance=0x{instance:X}, getter对象=0x{player:X}, ActorOwner=0x{:X}, PlayerComponent=0x{:X}, Shape=0x{:X}。尚需跨世界/退出/分屏生命周期实机验证；不得作为永久指针",
+        evidence.owner_component,evidence.player_component,evidence.shape_component))
+}
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Action {Verify, Start, EnableGetter, Stop, Status}
+pub enum Action {Verify, Start, EnableGetter, Stop, Status, ValidatePlayer}
 impl Action {
     pub fn from_str(value:&str)->Result<Self,String>{
         match value{
@@ -279,7 +314,8 @@ impl Action {
             "enable_getter"=>Ok(Self::EnableGetter),
             "stop"=>Ok(Self::Stop),
             "status"=>Ok(Self::Status),
-            _=>Err("支持 verify/start/enable_getter/stop/status".into()),
+            "validate_player"=>Ok(Self::ValidatePlayer),
+            _=>Err("支持 verify/start/enable_getter/stop/status/validate_player".into()),
         }
     }
 }
@@ -290,6 +326,7 @@ pub fn execute(action:Action)->Result<String,String>{
         Action::EnableGetter=>enable_verified_getter(),
         Action::Stop=>stop(),
         Action::Status=>Ok(status()),
+        Action::ValidatePlayer=>validate_captured_player(),
     }
 }
 pub fn status()->String{

@@ -341,8 +341,9 @@ impl Workbench{
     pub fn submit_lifecycle_for_ai(
         &mut self,action:crate::lifecycle::Action
     )->Result<String,String>{
-        if !matches!(action,crate::lifecycle::Action::Verify|crate::lifecycle::Action::Stop){
-            return Err("远程只能进行验证或停止观察器".into());
+        if !matches!(action,crate::lifecycle::Action::Verify|
+            crate::lifecycle::Action::Stop|crate::lifecycle::Action::ValidatePlayer){
+            return Err("远程只能进行配置验证、结构复核或停止观察器".into());
         }
         self.engine.submit(Command::Lifecycle(action))?;
         self.tab=Tab::LocalPlayer;
@@ -706,6 +707,10 @@ impl Workbench{
                 }
                 if ui.add_enabled(!self.engine.busy,egui::Button::new("刷新结果")).clicked(){
                     self.job(Command::Lifecycle(crate::lifecycle::Action::Status));
+                }
+                if ui.add_enabled(!self.engine.busy,
+                    egui::Button::new("验证 Getter 对象 ECS 关系")).clicked(){
+                    self.job(Command::Lifecycle(crate::lifecycle::Action::ValidatePlayer));
                 }
             });
             for line in self.lifecycle_status.iter().take(8){

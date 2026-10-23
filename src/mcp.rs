@@ -224,9 +224,9 @@ fn handle_http(stream: &mut TcpStream, secret: &str) {
             },
             {
                 "name":"devtools_lifecycle",
-                "description":"管理已验证的游戏线程观察器：status 查询实时快照，verify 验证本地配置，stop 停止并清理。出于进程安全考虑，MCP 不允许启用 Hook 或调用 getter，必须在 DevTools 本地 UI 显式授权。",
+                "description":"游戏线程观察器：status/verify/stop 与 validate_player 只读验证已采集的 getter 返回对象及版本化 ECS 关系。MCP 不能主动安装 Hook 或调用 getter，必须在本地 UI 授权。",
                 "inputSchema":{"type":"object","properties":{
-                    "action":{"type":"string","enum":["status","verify","stop"]}
+                    "action":{"type":"string","enum":["status","verify","stop","validate_player"]}
                 },"required":["action"]}
             },
             {
@@ -388,7 +388,8 @@ fn call_tool(request:&Value) -> Value {
                 "status"=>crate::lifecycle::Action::Status,
                 "verify"=>crate::lifecycle::Action::Verify,
                 "stop"=>crate::lifecycle::Action::Stop,
-                _=>return Err("MCP 仅允许 status/verify/stop；本地 UI 才能启用 Hook".into()),
+                "validate_player"=>crate::lifecycle::Action::ValidatePlayer,
+                _=>return Err("MCP 仅允许 status/verify/stop/validate_player；本地 UI 才能启用 Hook".into()),
             };
             // Status does not need to lock the egui UI; all hooks publish into
             // atomics, with a short-lived control lock for state metadata.
