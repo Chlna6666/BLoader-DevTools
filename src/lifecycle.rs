@@ -22,7 +22,7 @@ use crate::{memory,symbols};
 
 const MAX_FILE:u64=16*1024;
 const OBSERVATION_TTL_MS:u64=3000;
-static CONTROL:Mutex<Control>=Mutex::new(Control{target:0,active:false,getter:0});
+static CONTROL:Mutex<Control>=Mutex::new(Control{target:0,active:false,getter:0,pinned:false,patch_disabled:false});
 static ORIGINAL:AtomicUsize=AtomicUsize::new(0);
 static ENABLED:AtomicBool=AtomicBool::new(false);
 static GETTER:AtomicUsize=AtomicUsize::new(0);
@@ -31,16 +31,20 @@ static INSTANCE:AtomicUsize=AtomicUsize::new(0);
 static PLAYER:AtomicUsize=AtomicUsize::new(0);
 static THREAD_ID:AtomicU32=AtomicU32::new(0);
 static CAPTURE_COUNT:AtomicU64=AtomicU64::new(0);
+static SNAPSHOT_SEQ:AtomicU64=AtomicU64::new(0);
+static SNAPSHOT_WRITER:AtomicBool=AtomicBool::new(false);
+static CONCURRENT_SKIPS:AtomicU64=AtomicU64::new(0);
 static LAST_SEEN:AtomicU64=AtomicU64::new(0);
 static IS_READY:AtomicBool=AtomicBool::new(false);
 
 #[link(name="kernel32")]
 unsafe extern "system" {
     fn GetTickCount64()->u64;
+    fn GetModuleHandleExW(flags:u32,address:*const u16,module:*mut *mut c_void)->i32;
 }
 type UpdateFn=unsafe extern "system" fn(*mut c_void,bool)->bool;
 type GetterFn=unsafe extern "system" fn(*mut c_void)->*mut c_void;
-struct Control{target:usize,active:bool,getter:usize}
+struct Control{target:usize,active:bool,getter:usize,pinned:bool,patch_disabled:bool}
 #[derive(Clone,Debug)]
 struct CodeTarget{
     module:String,sha256:String,rva:usize,entry_bytes:Vec<u8>,address:usize,
@@ -150,34 +154,84 @@ pub fn verify_profile()->Result<String,String>{
         profile.update.module,profile.update.rva,profile.update.address,getter
     ))
 }
+// BL Mod v1 on_unload returns void and cannot veto FreeLibrary. Once a hook
+// has ever been enabled, retain BOTH the detour DLL and the MinHook trampoline
+// until process exit. Disabling only prevents new branches into the detour;
+// another thread may already have fetched the old branch instruction.
+fn pin_module_for_hook()->Result<(),String>{
+    const PIN:u32=0x0000_0001;
+    const FROM_ADDRESS:u32=0x0000_0004;
+    let mut module:*mut c_void=std::ptr::null_mut();
+    let ok=unsafe{GetModuleHandleExW(
+        PIN|FROM_ADDRESS,on_update as *const () as *const u16,&mut module
+    )};
+    if ok==0 || module.is_null(){
+        return Err(format!("无法将 Detour 所在 DLL 固定至进程结束：{}",
+            std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+#[derive(Clone,Copy)]
+struct Captured{
+    instance:usize,player:usize,thread:u32,ready:bool,last_seen:u64,
+    callbacks:u64,epoch:u64,
+}
+fn capture_snapshot()->Option<Captured>{
+    for _ in 0..8 {
+        let epoch=SNAPSHOT_SEQ.load(Ordering::Acquire);
+        if epoch&1!=0 {std::hint::spin_loop();continue;}
+        let snap=Captured{
+            instance:INSTANCE.load(Ordering::Acquire),
+            player:PLAYER.load(Ordering::Acquire),
+            thread:THREAD_ID.load(Ordering::Acquire),
+            ready:IS_READY.load(Ordering::Acquire),
+            last_seen:LAST_SEEN.load(Ordering::Acquire),
+            callbacks:CAPTURE_COUNT.load(Ordering::Relaxed),
+            epoch,
+        };
+        if SNAPSHOT_SEQ.load(Ordering::Acquire)==epoch{return Some(snap);}
+    }
+    None
+}
 unsafe extern "system" fn on_update(instance:*mut c_void,ready:bool)->bool{
     IN_FLIGHT.fetch_add(1,Ordering::AcqRel);
     let original=ORIGINAL.load(Ordering::Acquire);
-    // ORIGINAL is published before the Hook is ever enabled.
-    // A null original would mean a broken lifecycle and must fail closed.
     if original==0 {
+        // This is unreachable while a hook is installed: ORIGINAL and its
+        // trampoline are deliberately never retired after first enable.
         IN_FLIGHT.fetch_sub(1,Ordering::AcqRel);
         return false;
     }
     let callback:UpdateFn=unsafe{mem::transmute(original)};
-    if ENABLED.load(Ordering::Acquire) && !instance.is_null() {
-        INSTANCE.store(instance as usize,Ordering::Release);
-        THREAD_ID.store(unsafe{GetCurrentThreadId()},Ordering::Release);
-        IS_READY.store(ready,Ordering::Release);
-        LAST_SEEN.store(unsafe{GetTickCount64()},Ordering::Release);
-        CAPTURE_COUNT.fetch_add(1,Ordering::Relaxed);
-    }
     let result=unsafe{callback(instance,ready)};
     if ENABLED.load(Ordering::Acquire) && !instance.is_null(){
-        let address=GETTER.load(Ordering::Acquire);
-        if address!=0 && ready {
-            // An explicitly approved, version-pinned getter is invoked ONLY
-            // on the real game update thread, following original update.
-            let getter:GetterFn=unsafe{mem::transmute(address)};
-            let player=unsafe{getter(instance)};
-            PLAYER.store(player as usize,Ordering::Release);
+        // Never serialize arbitrary game callbacks on a mutex. Only the first
+        // observed update thread may publish a complete snapshot/invoke getter.
+        if SNAPSHOT_WRITER.compare_exchange(false,true,Ordering::Acquire,
+            Ordering::Relaxed).is_ok(){
+            let thread=unsafe{GetCurrentThreadId()};
+            let owner=THREAD_ID.load(Ordering::Acquire);
+            if owner==0 || owner==thread {
+                let address=GETTER.load(Ordering::Acquire);
+                let player=if address!=0 && ready &&
+                    ENABLED.load(Ordering::Acquire) {
+                    let getter:GetterFn=unsafe{mem::transmute(address)};
+                    unsafe{getter(instance)} as usize
+                }else{0};
+                SNAPSHOT_SEQ.fetch_add(1,Ordering::AcqRel); // odd: writer
+                INSTANCE.store(instance as usize,Ordering::Release);
+                PLAYER.store(player,Ordering::Release);
+                THREAD_ID.store(thread,Ordering::Release);
+                IS_READY.store(ready,Ordering::Release);
+                LAST_SEEN.store(unsafe{GetTickCount64()},Ordering::Release);
+                CAPTURE_COUNT.fetch_add(1,Ordering::Relaxed);
+                SNAPSHOT_SEQ.fetch_add(1,Ordering::Release); // even: publish
+            }else{
+                CONCURRENT_SKIPS.fetch_add(1,Ordering::Relaxed);
+            }
+            SNAPSHOT_WRITER.store(false,Ordering::Release);
         }else{
-            PLAYER.store(0,Ordering::Release);
+            CONCURRENT_SKIPS.fetch_add(1,Ordering::Relaxed);
         }
     }
     IN_FLIGHT.fetch_sub(1,Ordering::AcqRel);
@@ -186,36 +240,60 @@ unsafe extern "system" fn on_update(instance:*mut c_void,ready:bool)->bool{
 fn clear_snapshot(){
     ENABLED.store(false,Ordering::Release);
     GETTER.store(0,Ordering::Release);
+    // Called with the control mutex held, before enabling or after draining.
+    SNAPSHOT_SEQ.fetch_add(1,Ordering::AcqRel);
     INSTANCE.store(0,Ordering::Release);
     PLAYER.store(0,Ordering::Release);
     THREAD_ID.store(0,Ordering::Release);
     IS_READY.store(false,Ordering::Release);
     LAST_SEEN.store(0,Ordering::Release);
+    SNAPSHOT_SEQ.fetch_add(1,Ordering::Release);
 }
 pub fn install_observer()->Result<String,String>{
     let mut control=CONTROL.lock().map_err(|_|"观察器控制锁中毒")?;
-    if control.active{return Err("已经启用了 ClientInstance 生命周期观察器".into());}
+    if control.active{return Err("生命周期观察器仍然处于活动或退休等待状态".into());}
+    if IN_FLIGHT.load(Ordering::Acquire)!=0 {
+        return Err("旧版回调仍未排空，不能重新启用观察器".into());
+    }
     let mut profile=profile_file()?;
     check_code(&mut profile.update)?;
     let target=profile.update.address as *mut c_void;
-    min_hook_rs::initialize().map_err(|e|format!("初始化 Hook 失败：{e:?}"))?;
-    let trampoline=match min_hook_rs::create_hook(target,on_update as *mut c_void){
-        Ok(p)=>p,
-        Err(e)=>{let _=min_hook_rs::uninitialize();return Err(format!("创建 Hook 失败：{e:?}"));}
-    };
-    ORIGINAL.store(trampoline as usize,Ordering::Release);
-    clear_snapshot();
-    ENABLED.store(true,Ordering::Release);
-    if let Err(e)=min_hook_rs::enable_hook(target){
-        ENABLED.store(false,Ordering::Release);
-        let _=min_hook_rs::remove_hook(target);
-        ORIGINAL.store(0,Ordering::Release);
-        let _=min_hook_rs::uninitialize();
-        return Err(format!("启用 Hook 失败：{e:?}"));
+    if control.target!=0 && control.target!=target as usize {
+        return Err("进程内保留了另一目标的 trampoline；禁止更换 Hook 目标，请重启游戏".into());
     }
-    control.target=target as usize;
+    if control.target==0 {
+        min_hook_rs::initialize().map_err(|e|format!("初始化 Hook 失败：{e:?}"))?;
+        let trampoline=match min_hook_rs::create_hook(target,on_update as *mut c_void){
+            Ok(p)=>p,
+            Err(e)=>{
+                let _=min_hook_rs::uninitialize();
+                return Err(format!("创建 Hook 失败：{e:?}"));
+            }
+        };
+        ORIGINAL.store(trampoline as usize,Ordering::Release);
+        if let Err(err)=pin_module_for_hook(){
+            // The hook has not yet been enabled, so it is safe to clean up.
+            let _=min_hook_rs::remove_hook(target);
+            ORIGINAL.store(0,Ordering::Release);
+            let _=min_hook_rs::uninitialize();
+            return Err(err);
+        }
+        // The PIN is irreversible. Keep the trampoline allocated forever,
+        // including after stop(), to protect delayed in-flight detours.
+        control.target=target as usize;
+        control.pinned=true;
+        control.patch_disabled=true;
+    }
+    clear_snapshot();
+    if let Err(e)=min_hook_rs::enable_hook(target){
+        // Do not release the trampoline even if the patch API reports failure.
+        // On another thread the patch may already have become visible.
+        return Err(format!("启用 Hook 失败：{e:?}；DLL 已固定，trampoline 不会被释放"));
+    }
+    control.patch_disabled=false;
     control.active=true;
-    Ok(format!("已启用只读 ClientInstance::update 观察器；模块 {} RVA 0x{:X}，不调用 getter",
+    ENABLED.store(true,Ordering::Release);
+    Ok(format!("已启用只读 ClientInstance::update 观察器；{} RVA 0x{:X}；Hook DLL/trampoline 将保留到游戏进程退出；getter 未授权",
         profile.update.module,profile.update.rva))
 }
 pub fn enable_verified_getter()->Result<String,String>{
@@ -243,31 +321,36 @@ pub fn enable_verified_getter()->Result<String,String>{
 }
 pub fn stop()->Result<String,String>{
     let mut control=CONTROL.lock().map_err(|_|"观察器控制锁中毒")?;
-    if !control.active{
+    if !control.active {
         clear_snapshot();
-        return Ok("观察器未安装".into());
+        return Ok(if control.pinned {
+            "观察器已停止；Detour DLL 与 trampoline 仍安全保留至进程退出".into()
+        }else{"观察器未安装".into()});
     }
     let target=control.target as *mut c_void;
-    // Prevent future getter calls before making a thread-invasive patch.
+    // A getter already loaded by an in-flight callback is protected by
+    // IN_FLIGHT; neither it nor the retained trampoline may be reclaimed.
     GETTER.store(0,Ordering::Release);
     ENABLED.store(false,Ordering::Release);
-    min_hook_rs::disable_hook(target).map_err(|e|
-        format!("无法禁用观察器 Hook：{e:?}；不要热卸载 DLL"))?;
+    if !control.patch_disabled {
+        min_hook_rs::disable_hook(target).map_err(|e|
+            format!("无法禁用观察器 Hook：{e:?}；DLL 已固定，不能安全热卸载"))?;
+        control.patch_disabled=true;
+    }
     let deadline=Instant::now()+Duration::from_secs(3);
     while IN_FLIGHT.load(Ordering::Acquire)!=0 {
         if Instant::now()>deadline {
-            return Err("回调尚未退出；为避免悬空 trampoline，请不要热卸载 DevTools".into());
+            return Err("回调未在 3 秒内排空；Hook DLL/trampoline 保留，禁止热替换".into());
         }
         std::thread::yield_now();
     }
-    min_hook_rs::remove_hook(target).map_err(|e|format!("卸除 Hook 失败：{e:?}"))?;
-    let _=min_hook_rs::uninitialize();
-    control.target=0;
+    // Do not call remove_hook()/uninitialize() after a hook was enabled:
+    // even when IN_FLIGHT == 0, a paused thread may have already fetched the
+    // detour branch but not entered the Rust callback yet.
     control.active=false;
     control.getter=0;
-    ORIGINAL.store(0,Ordering::Release);
     clear_snapshot();
-    Ok("观察器已关闭、原函数 trampoline 已退休、采集指针已清除".into())
+    Ok("观察器已禁用且已排空可见回调；DLL 与 trampoline 固定至进程退出，未进行不安全卸载".into())
 }
 /// Check the captured getter result against the exact game EXE's ECS
 /// profile, on the DevTools worker (never in the hot game update detour).
@@ -278,16 +361,16 @@ pub fn validate_captured_player()->Result<String,String>{
     if !active || !getter {
         return Err("需要先启用观察器，并由用户单独批准 getter ABI".into());
     }
+    let snapshot=capture_snapshot().ok_or("采集快照正在更新，请重试")?;
     let now=unsafe{GetTickCount64()};
-    let last=LAST_SEEN.load(Ordering::Acquire);
-    if last==0 || now.saturating_sub(last)>OBSERVATION_TTL_MS {
+    if snapshot.last_seen==0 || now.saturating_sub(snapshot.last_seen)>OBSERVATION_TTL_MS {
         return Err("最近 3 秒没有新鲜的游戏 update 回调；请进入世界重试".into());
     }
-    if !IS_READY.load(Ordering::Acquire){
+    if !snapshot.ready {
         return Err("最近一次 update 的 ready 标志尚未就绪".into());
     }
-    let player=PLAYER.load(Ordering::Acquire);
-    let instance=INSTANCE.load(Ordering::Acquire);
+    let player=snapshot.player;
+    let instance=snapshot.instance;
     if player<0x10000 || player&7!=0 || instance<0x10000 {
         return Err("getter 当前返回 nullptr、非法地址，或 ClientInstance 尚未确认".into());
     }
@@ -296,13 +379,15 @@ pub fn validate_captured_player()->Result<String,String>{
         .ok_or("没有与当前客户端 EXE SHA-256 完全匹配的 ecs_layouts.json 配置，拒绝使用旧版偏移")?;
     let evidence=crate::ecs_layout::inspect_known_actor(player,&layout)
         .ok_or("getter 候选未通过 ActorOwner / Player / Shape 三组件及双向引用验证；不输出已确认对象")?;
-    if LAST_SEEN.load(Ordering::Acquire)!=last ||
-        PLAYER.load(Ordering::Acquire)!=player {
-        return Err("检查过程中游戏对象已更新，拒绝提交跨代次的结构结果".into());
+    // A -> B -> A pointer reuse must also be rejected, not just address
+    // changes. A monotonic seqlock generation identifies ANY intervening
+    // callback, even when the same address is recycled.
+    if capture_snapshot().is_none_or(|current|current.epoch!=snapshot.epoch) {
+        return Err("检查期间游戏快照代次发生变化，拒绝跨代次 ECS 结构结果".into());
     }
     Ok(format!(
-        "结构验证通过（仅限当前快照）：ClientInstance=0x{instance:X}, getter对象=0x{player:X}, ActorOwner=0x{:X}, PlayerComponent=0x{:X}, Shape=0x{:X}。尚需跨世界/退出/分屏生命周期实机验证；不得作为永久指针",
-        evidence.owner_component,evidence.player_component,evidence.shape_component))
+        "结构验证通过（仅限快照代次 {}）：ClientInstance=0x{instance:X}, getter对象=0x{player:X}, ActorOwner=0x{:X}, PlayerComponent=0x{:X}, Shape=0x{:X}。尚需跨世界/退出/分屏生命周期实机验证；不得作为永久指针",
+        snapshot.epoch,evidence.owner_component,evidence.player_component,evidence.shape_component))
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Action {Verify, Start, EnableGetter, Stop, Status, ValidatePlayer}
@@ -330,16 +415,25 @@ pub fn execute(action:Action)->Result<String,String>{
     }
 }
 pub fn status()->String{
-    let (active,getter)=CONTROL.lock().map(|c|(c.active,c.getter!=0)).unwrap_or((false,false));
+    let (active,getter,pinned,patch_disabled)=CONTROL.lock()
+        .map(|c|(c.active,c.getter!=0,c.pinned,c.patch_disabled))
+        .unwrap_or((false,false,false,false));
     let now=unsafe{GetTickCount64()};
-    let last=LAST_SEEN.load(Ordering::Acquire);
-    let fresh=last!=0 && now.saturating_sub(last)<=OBSERVATION_TTL_MS;
-    let instance=if fresh{INSTANCE.load(Ordering::Acquire)}else{0};
-    let player=if fresh && getter{PLAYER.load(Ordering::Acquire)}else{0};
-    format!("observer={} getter_enabled={} callbacks={} callback_thread={} ready={} last_seen_ms={} fresh={} ClientInstance_candidate=0x{:X} LocalPlayer_candidate=0x{:X}; candidate-only, world unload invalidates pointers",
-        active,getter,CAPTURE_COUNT.load(Ordering::Relaxed),
-        THREAD_ID.load(Ordering::Acquire),IS_READY.load(Ordering::Acquire),
-        if last==0{0}else{now.saturating_sub(last)},fresh,instance,player)
+    let snapshot=capture_snapshot();
+    let fresh=snapshot.is_some_and(|s|s.last_seen!=0 &&
+        now.saturating_sub(s.last_seen)<=OBSERVATION_TTL_MS);
+    let instance=if fresh{snapshot.map_or(0,|s|s.instance)}else{0};
+    let player=if fresh && getter{snapshot.map_or(0,|s|s.player)}else{0};
+    let last_seen=snapshot.map_or(0,|s|if s.last_seen==0 {0}
+        else{now.saturating_sub(s.last_seen)});
+    format!("observer={} getter_enabled={} module_pinned={} patch_disabled={} in_flight={} concurrent_skips={} callbacks={} snapshot_epoch={} callback_thread={} ready={} last_seen_ms={} fresh={} ClientInstance_candidate=0x{:X} LocalPlayer_candidate=0x{:X}; candidate-only, world unload invalidates pointers",
+        active,getter,pinned,patch_disabled,IN_FLIGHT.load(Ordering::Acquire),
+        CONCURRENT_SKIPS.load(Ordering::Relaxed),
+        snapshot.map_or(0,|s|s.callbacks),
+        snapshot.map_or(0,|s|s.epoch),
+        snapshot.map_or(0,|s|s.thread),
+        snapshot.is_some_and(|s|s.ready),
+        last_seen,fresh,instance,player)
 }
 #[cfg(test)]
 mod tests{
@@ -367,6 +461,12 @@ mod tests{
         assert!(unsafe{on_update(this,true)});
         assert_eq!(PLAYER.load(Ordering::Acquire),this as usize);
         assert_eq!(IN_FLIGHT.load(Ordering::Acquire),0);
+        // Disabled capture must still forward the original callback.
+        ENABLED.store(false,Ordering::Release);
+        GETTER.store(synthetic_getter as usize,Ordering::Release);
+        PLAYER.store(0,Ordering::Release);
+        assert!(unsafe{on_update(this,true)});
+        assert_eq!(PLAYER.load(Ordering::Acquire),0);
         clear_snapshot();
         ORIGINAL.store(0,Ordering::Release);
     }
