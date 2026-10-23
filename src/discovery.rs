@@ -3,7 +3,7 @@
 //! Symbol Resolver -> ECS reference inspection -> LocalPlayer Validator.
 //! This tool produces evidence, never fabricates an Actor*/LocalPlayer*.
 //! All process memory reads run on DevTools' background worker.
-use std::{cmp::Ordering as Cmp,collections::{HashMap,HashSet},ffi::c_void,mem,sync::atomic::{AtomicBool,Ordering}};
+use std::{cmp::Ordering as Cmp,collections::HashMap,ffi::c_void,mem,sync::atomic::{AtomicBool,Ordering}};
 use windows_sys::Win32::System::Memory::{
     VirtualQuery,MEMORY_BASIC_INFORMATION,MEM_COMMIT,MEM_PRIVATE,
     PAGE_GUARD,PAGE_NOACCESS,PAGE_READWRITE,PAGE_WRITECOPY,
@@ -208,30 +208,40 @@ fn push_geometry(base:usize,data:&[u8],profile:Profile,results:&mut Vec<Seed>){
     }
 }
 fn geometry_regions(regions:&[Region],byte_budget:usize)->Vec<Region>{
-    let mut chosen=Vec::new();
-    if regions.is_empty(){return chosen;}
-    // Spread the finite budget across address space rather than reading the
-    // first 128 MiB or the first handful of largest allocations.
-    let per_region=((byte_budget/regions.len()).max(4096)).min(512*1024);
-    let mut total=0usize;
-    for region in regions {
-        if total>=byte_budget{break;}
-        let take=per_region.min(region.len).min(byte_budget-total);
-        if take<24{continue;}
-        let count=region.len.div_ceil(take);
-        let stride=region.len/count.max(1);
-        for n in 0..count {
-            if total>=byte_budget {break;}
-            let start=region.base+n*stride;
-            let len=take.min(region.base+region.len-start).min(byte_budget-total);
-            if len>=24 {
-                chosen.push(Region{base:start,len});
-                total+=len;
-            }
+    let mut selected=Vec::new();
+    if regions.is_empty()||byte_budget<4096{return selected;}
+    // First choose regions uniformly across the entire address space, not
+    // only the first low addresses. Each pass samples at most one small slice
+    // from each region, so a single huge heap cannot consume the budget.
+    let slots=regions.len().min(byte_budget/4096).max(1);
+    let indexes=(0..slots).map(|n|n*regions.len()/slots).collect::<Vec<_>>();
+    let mut next_pass=vec![0usize;slots];
+    let chunk=(byte_budget/slots).clamp(4096,512*1024);
+    let mut budget=byte_budget;
+    loop{
+        let mut progress=false;
+        for (slot,&index) in indexes.iter().enumerate(){
+            let region=regions[index];
+            if budget<24{break;}
+            let total_passes=region.len.div_ceil(chunk);
+            let pass=next_pass[slot];
+            if pass>=total_passes{continue;}
+            // Alternating the low and high edge of each region reaches
+            // spatially distant allocations before filling intervening bytes.
+            let page=if pass%2==0{pass/2}else{total_passes-1-pass/2};
+            let start_offset=page*chunk;
+            let take=(region.len-start_offset).min(chunk).min(budget);
+            if take<24{continue;}
+            selected.push(Region{base:region.base+start_offset,len:take});
+            next_pass[slot]+=1;
+            budget-=take;
+            progress=true;
         }
+        if !progress{break;}
     }
-    chosen
+    selected
 }
+
 fn collect_geometry(profile:Profile,budget:usize,cancel:&AtomicBool)
     ->(Vec<Seed>,usize,usize,usize){
     let valid_regions=regions(true,false,0x10000,usize::MAX);
@@ -471,7 +481,19 @@ mod tests {
         push_geometry(0x10000,&data,profile,&mut result);
         assert!(result.iter().any(|p|p.address==0x10010 && p.kind==SeedKind::Vec3Position));
     }
-    #[test]fn reverse_reference_targets(){
+    #[test]fn sample_budget_spreads_across_regions(){
+        let regs=vec![
+            Region{base:0x10000,len:128*1024*1024},
+            Region{base:0x20000000,len:128*1024*1024},
+            Region{base:0x40000000,len:128*1024*1024},
+        ];
+        let chosen=geometry_regions(&regs,12*1024*1024);
+        assert!(chosen.iter().any(|r|r.base>=regs[0].base && r.base<regs[0].base+regs[0].len));
+        assert!(chosen.iter().any(|r|r.base>=regs[1].base && r.base<regs[1].base+regs[1].len));
+        assert!(chosen.iter().any(|r|r.base>=regs[2].base && r.base<regs[2].base+regs[2].len));
+        assert!(chosen.iter().map(|r|r.len).sum::<usize>()<=12*1024*1024);
+    }
+        #[test]fn reverse_reference_targets(){
         let targets=pointer_targets(0x20080);
         assert_eq!(targets.get(&0x20000),Some(&128));
         assert_eq!(targets.get(&0x20080),Some(&0));
