@@ -1408,8 +1408,7 @@ impl Workbench{
             .stick_to_bottom(true).show(ui,|ui|{
                 ui.add(TextEdit::multiline(&mut snapshot)
                     .font(egui::TextStyle::Monospace)
-                    .desired_width(ui.available_width().max(80.))
-                    .frame(false));
+                    .desired_width(ui.available_width().max(80.)));
             });
     }
 
